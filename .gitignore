@@ -1,0 +1,19 @@
+.httr-oauth
+.RData
+.Rhistory
+.Rproj.user
+.Renviron
+.DS_Store
+*.Rproj
+
+# folders
+Google_results
+workflow_files
+workflow_cache
+
+# HTML, png, pdf
+*.html
+*.png
+*.pdf
+
+.CensusAPIkey.R

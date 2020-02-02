@@ -1,0 +1,344 @@
+---
+title: "Working with geodata"
+author: "Hunter Ratliff"
+date: "1/24/2020"
+output:
+  html_document:
+    df_print: paged
+    code_folding: show
+    toc: true
+    toc_float: true
+---
+
+    
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=T, warning=F, message=F)
+
+library(testthat)
+library(magrittr)
+library(ggmap)
+library(viridis)
+library(tictoc)
+library(RColorBrewer)
+library(rgeos)
+library(spdep)
+library(sp)
+library(maps)
+library(maptools)
+library(sf) # newer, better version of sp
+library(tigris)
+library(leaflet)
+library(tidycensus)
+library(tidyverse)
+
+options(tigris_class = "sf")
+options(tigris_use_cache = TRUE)
+```
+
+# Read in data & transform
+
+Spatial data in R is not my strong suit, so these articles helped me get to where I am (and might be helpful in the future for debugging):
+
+- [Plotting "Spatial" data with ggplot](https://eriqande.github.io/rep-res-eeb-2017/plotting-spatial-data-with-ggplot.html) Very good resource
+- [Mapping using ggplot2](http://zevross.com/blog/2014/07/16/mapping-in-r-using-the-ggplot2-package/)
+- [Plotting polygons](https://github.com/tidyverse/ggplot2/wiki/plotting-polygon-shapefiles) using `geom_polygon` and `fortify(Spatial*Polygons*DataFrame)`
+
+## Projections & coordinates
+
+
+Per the linked website [above](https://mgimond.github.io/Spatial/coordinate-systems-in-r.html#understanding-the-proj4-coordinate-syntax), there are two ways of defining a coordinate system: via the EPSG numeric code or via the PROJ4 formatted string. All spatial objects with defined coordinate systems will always have a PROJ4 projection string, but not all will have a EPSG numeric code. 
+
+When we read in the county level polygons (using tigris / tidycensus) it returns objects with a class of `sf` that use the following Coordinate Reference System:
+
+- EPSG: 4269 
+- proj4string: "+proj=longlat +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +no_defs"
+
+When these are coerced to sp objects the EPSG gets dropped
+
+## Creating sf objects
+
+We can grab the geomety of the counties using the **tigris** package or use **tidycensus** package to grab the population estimates along with the tigris shapes. Both return objects with the classes "sf" "data.frame"
+
+```{r getCounties, collapse=T}
+# Counties w/ population
+countyPop <- tidycensus::get_acs(geography = "county", geometry = T,
+                                 state = "TX", 
+                                 variables = "B01001_001")
+class(countyPop)
+
+
+# using tigris alone
+counties <- tigris::counties(state = "TX", cb=T)
+class(counties)
+rm(counties)
+```
+
+To create the points for each provider we can also make a sf object from the tibble. When we do this, we need to specify the CRS (coordinate reference system) by supplying it with the same CRS as we are using in the county files^[You can reterieve the CRS with `sf::st_crs()`]. 
+
+```{r}
+# Geocoded from API
+geo_raw <- read_csv("Google_results/geo_google_raw.csv")
+glimpse(geo_raw)
+
+# Make sf object
+TX_providers <- geo_raw %>%
+  filter(geoState=="tx") %>%
+  st_as_sf(coords = c("lon", "lat"), crs=4269)
+class(TX_providers)
+
+# Same CRS?
+st_crs(TX_providers) == st_crs(counties)
+```
+
+
+#### Going from sf to sp
+
+sf objects can easily be converted to their sp counterparts (SpatialXXXDataFrame) using `sf::as_Spatial()`. Notably, this transformation drops the EPSG code
+
+```{r SFtoSP, eval=F}
+## NOT RUN
+
+## sf --> Spatial POLYGONS Data Frame
+countyPop %>% 
+  sf::as_Spatial(IDs = countyPop$GEOID) %>%
+  class()
+
+
+## sf --> Spatial POINTS Data Frame
+TX_providers %>%
+  sf::as_Spatial(IDs = TX_providers$npi) %>%
+  class()
+
+
+## sp object can be brought back with st_as_sf()
+tx_sp <- TX_providers %>% sf::as_Spatial()
+st_as_sf(tx_sp)  # must reassign CRS !
+```
+
+
+
+
+
+
+
+
+
+# Plotting
+
+Using ggplot with sf objects is easy. It's a bit harder with sp
+
+```{r plot1}
+ggplot() + 
+  geom_sf(data=countyPop) +
+  geom_sf(data=TX_providers) +
+  coord_sf(crs = 4269)
+
+
+# countyPop %>%
+#   filter(str_detect(NAME, ", Texas")) %>%
+#   ggplot(aes(fill = estimate, color = estimate)) +
+#   geom_sf() +
+#   coord_sf(crs = 4269)
+```
+
+
+# Distance calculation
+
+The function below, `find_closest()` takes two arguments, both sf files. The first argument (`county_sf`) should be the geometries of the counties^[It'll throw an error if the geometry isn't a multipolygon] and the second (`prov_sf`) a sf object with the points of the providers.
+
+This function works in two main steps. First, for each feature/geometry (i.e. county) in `county_sf`, it finds the nearest point (i.e. provider) in `prov_sf`. It then calculates the distance from the identified provider to the county. If the centroid flag is TRUE (default), it calculates the distance from the provider to the centroid of the county. Otherwise, it finds the minimum distance from the edge of the county to the provider identified in the first step^[This has the added benifit of marking counties that have a provider anywhere within the county as having a distance of 0 miles].
+
+Please note that in the first step, this function finds the closest provider **based on the closest edge of the county**. It behaves this way **REGARDLESS of the centroid flag**.
+
+
+```{r closestFxn}
+find_closest <- function(county_sf, prov_sf, centroid=T) {
+  
+  tic() # time the function
+  library(testthat)
+  
+  test_that("inputs are sf objects", {
+    expect_s3_class(county_sf, "sf")
+    expect_s3_class(prov_sf, "sf")
+  })
+  
+  test_that("Correct geometries", {
+    county_sf_geo <- as.character(st_geometry_type(county_sf)[[1]])
+    expect_equal(county_sf_geo, "MULTIPOLYGON")
+    prov_sf_geo <- as.character(st_geometry_type(prov_sf)[[1]])
+    expect_equal(prov_sf_geo, "POINT")
+  })
+  
+  
+  
+  
+  # Finds index of nearest provider for each county
+  i <- st_nearest_feature(county_sf, prov_sf)
+  p <- prov_sf[i,]
+  
+  # Calculate distance for each element
+  if(centroid){
+    
+    distance <- st_distance(p, st_centroid(county_sf), by_element=T)
+  } else({
+    
+    distance <- st_distance(p, county_sf, by_element=T)
+  })
+  
+  
+  # Create a data frame with results
+  df <- tibble(
+    GEOID         = county_sf$GEOID,
+    npi           = p$npi,
+    providerCity  = p$geoCity,
+    providerST    = p$geoState,
+    Distance      = units::set_units(distance, mi),
+    Distance_m    = distance
+  ) %>%
+  mutate(
+    Distance = as.numeric(Distance)
+  )
+  
+  # Join to county_sf to make sf object
+  df_sf <- geo_join(county_sf, df, by="GEOID") 
+  
+   
+  toc() # end timer
+  return(df_sf)
+}
+```
+
+```{r loadData}
+geo_raw <- read_csv("Google_results/geo_google_raw.csv")
+
+multiCounties <- tigris::counties(state = state.abb, cb=T) %>%
+  filter(STATEFP!="02", STATEFP!="15")
+
+provs <- geo_raw %>%
+  filter(geoState!="hi", geoState!="ak") %>%
+  st_as_sf(coords = c("lon", "lat"), crs=4269)
+
+TBIs <- read_csv("Data/TBI_Deaths.csv")
+```
+
+```{r, eval=F}
+# takes around 20 sec to run
+df <- find_closest(multiCounties, provs, centroid = F) %>%
+  select(STATEFP, GEOID, NAME, npi:Distance_m, geometry)
+glimpse(df)
+```
+
+
+```{r, eval=F}
+# can take up to 60 seconds to render map
+df %>% 
+  ggplot() + 
+  geom_sf(aes(fill = Distance), color=NA) +
+  geom_sf(data=provs, alpha=0.25) +
+  coord_sf(crs = 4269) +
+  scale_fill_distiller(palette="Reds", guide = 'legend',
+                       trans="sqrt",
+                       name="Mi to nearest NSG", direction=1) +
+  theme(legend.direction="horizontal",legend.position=c(0.5,0)) +
+  ggthemes::theme_map() +
+  theme(legend.direction="horizontal")
+```
+
+### Correlation
+
+```{r, eval=F}
+df %>%
+  inner_join(TBIs, by=c("GEOID"="CountyFIPS")) %>%
+  mutate(PercTBI = percent_rank(Crude_Rate)) %>%
+  filter(!is.na(PercTBI)) %>%
+  as.data.frame() %$%
+  cor(Distance, Crude_Rate)
+  # cor.test(~Crude_Rate+Distance, data=.)
+
+df %>%
+  inner_join(TBIs, by=c("GEOID"="CountyFIPS")) %>%
+  mutate(PercTBI = percent_rank(Crude_Rate)) %>%
+  filter(!is.na(PercTBI)) %>%
+  as.data.frame() %>%
+  glm(Crude_Rate~sqrt(Distance), data=., family = gaussian(link = "log")) %>%
+  # lm(Crude_Rate~sqrt(Distance), data=.) %>%
+  plot()
+  summary()
+  
+```
+
+
+## Making arrows
+
+```{r, eval=F, include=F}
+# to create lines manually:
+cbind(c(0,0,1,2), c(3,4,5,5)) %>% st_linestring() %>% plot()
+```
+
+```{r, eval=F}
+
+tigris::counties(state = "TX", cb=T) %>%
+  find_closest(provs, centroid = T) %>%
+  # View()
+  # left_join(geo_raw) %>%
+  # select(GEOID, NAME, npi:Distance, lon, lat, geometry) %>%
+  ggplot() +
+  geom_sf(aes(fill=Distance), color=NA) +
+  geom_sf(data=TX_providers, alpha=0.25) +
+  # geom_point(aes(lat, lon)) + # not working
+  coord_sf(crs = 4269) +
+  scale_fill_distiller(palette="Reds", guide = 'legend',
+                       # values = c(0,.25,1),
+                       trans="sqrt",
+                       name="Mi to nearest NSG", direction=1) +
+  theme(legend.direction="horizontal",legend.position=c(0.5,0)) +
+  ggthemes::theme_map()
+```
+
+
+
+
+
+
+
+```{r DistUsingSP, eval=F}
+proj_str <- st_crs(TX_providers)$proj4string  # Use same projection as our current map
+
+# Get a few counties
+county_sf <- counties %>%
+  filter(NAME%in% c("Galveston", "Lubbock", "Travis", "Bexar", "Dallas")) 
+county_sp <- county_sf %>%
+  as_Spatial()
+proj4string(county_sp) <- CRS(proj_str)
+
+# Select 3 random providers in TX
+prov_sf <- TX_providers %>% 
+  filter(npi %in% c(1578894267, 1154764728, 1144317157)) 
+prov_sp <- prov_sf %>%
+  sf::as_Spatial()
+proj4string(prov_sp) <- CRS(proj_str)
+
+
+DistMat <- rgeos::gDistance(prov_sp, county_sp, byid=T)
+rownames(DistMat) <- county_sp@data[["NAME"]]
+colnames(DistMat) <- prov_sp@data[["geoCity"]]
+DistMat
+{plot(county_sp)
+plot(prov_sp, add=T)}
+
+rm(county_sp, prov_sp, DistMat)
+```
+
+
+
+```{r, eval=F}
+pts <- locator(5,type="p")
+geosphere::dist2Line(p = SpatialPoints(pts), line = TX)
+
+pts2 <- sp::makegrid(wrld_simpl, n = 5)
+apply(rgeos::gDistance(SpatialPoints(pts, proj4string=CRS(proj4string(TX))), TX,byid=TRUE),2,min)
+```
+

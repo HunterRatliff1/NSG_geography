@@ -1,0 +1,521 @@
+---
+title: "Loading data"
+author: "Hunter Ratliff"
+date: "1/17/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=F, warning=F, message=F)
+
+library(spdep)
+library(sp)
+library(tigris)
+library(leaflet)
+library(tidycensus)
+library(tidyverse)
+library(ggmap)
+library(viridis)
+library(tictoc)
+library(RColorBrewer)
+library(rgeos)
+```
+
+```{r tigrisFiles}
+options(tigris_use_cache = TRUE)
+sf_county <- tigris::counties()
+# sf_zip    <- tigris::zctas(cb=F)
+```
+
+```{r getACS, echo=F}
+population <- tidycensus::get_acs(geography = "county", shift_geo = T,
+                                  variables = "B01001_001", geometry = T)
+population_leaflet <- tidycensus::get_acs(geography = "county", # don't shift
+                                  variables = "B01001_001", geometry = T)
+```
+
+```{r traumaCenters}
+traumaCenters <- read_csv("Data/TraumaCenters.csv")
+```
+
+```{r read_TBI}
+TBIs <- read_csv("Data/TBI_Deaths.csv")
+```
+
+
+
+
+
+# Load the NPI data
+
+We're grabbing data from the 2017 [Medicare Provider Utilization and Payment Data: Physician and Other Supplier](https://www.cms.gov/Research-Statistics-Data-and-Systems/Statistics-Trends-and-Reports/Medicare-Provider-Charge-Data/Physician-and-Other-Supplier2017). This data can be downloaded from this page, but contains over 9 million records and is 2 GB unzipped.
+
+The code chunk below downloads the whole dataset (`rawdata`), subsets it to select only neurosurgeons (`raw_NSG`) and writes that subset to a CSV. Because the full dataset is so large I only run this step once, and all future code will rely on `raw_NSG.csv`
+
+```{r loadFullData, eval=F}
+## Using RSocrata
+rawdata <- "https://data.cms.gov/resource/fs4p-t5eq.csv" %>%
+  read.socrata() %>%
+  as_tibble()
+beepr::beep()
+
+
+
+## Using downloaded file
+file_location <- paste0("~/Downloads/Medicare_Provider_Util_Payment_PUF_CY2017/",
+                        "Medicare_Provider_Util_Payment_PUF_CY2017.txt")
+
+rawdata <- readr::read_delim(file_location, "\t", escape_double=F, trim_ws=T)
+rm(file_location)
+
+
+
+## Select only Neurosurgery
+raw_NSG <- rawdata  %>% 
+  filter(npi!="0000000001") %>%
+  filter(provider_type=="Neurosurgery") %>%
+  rename(street=nppes_provider_street1, city=nppes_provider_city, 
+         state=nppes_provider_state, country=nppes_provider_country,
+         zip=nppes_provider_zip,
+         
+         lastName=nppes_provider_last_org_name,
+         firstName=nppes_provider_first_name,
+         gender=nppes_provider_gender) %>%
+  select(-nppes_provider_mi, -nppes_provider_street2) %>%
+  mutate(zip = str_trunc(zip, 5, "right", ellipsis = ""))
+
+write_csv(raw_NSG, "Data/raw_NSG.csv")
+rm(rawdata, raw_NSG)
+```
+
+```{r read_NSG}
+NSG <- read_csv("Data/raw_NSG.csv") %>%
+  rename(degree=nppes_credentials) %>%
+  mutate(degree = str_replace_all(degree, "\\.","")) %>%
+  
+  # Rename vars
+  rename(drug=hcpcs_drug_indicator,
+         accptMedicare=medicare_participation_indicator,
+         
+         num.services       = line_srvc_cnt,
+         num.bene_uniq      = bene_unique_cnt,
+         avg.allowed_amt    = average_Medicare_allowed_amt,
+         avg.submitted_chrg = average_submitted_chrg_amt,
+         avg.paid           = average_Medicare_payment_amt,
+         avg.paid_std       = average_Medicare_standard_amt) %>%
+  
+  # Select only relevant vars
+  select(-nppes_entity_code, -provider_type,
+         -bene_day_srvc_cnt) %>%
+  select(npi:gender, accptMedicare:avg.paid_std)
+```
+
+
+# Geocoding
+
+```{r callGeocoding, eval=F}
+sf_zip    <- tigris::zctas(cb=F)
+
+
+## Function to take coordinates, and return the name of the county
+latlong2county <- function(long, lat) {
+  library(sp)
+  library(maps)
+  library(maptools)
+  # Prepare SpatialPolygons object with one SpatialPolygon
+  # per county
+  counties <- map('county', fill=TRUE, col="transparent", plot=FALSE)
+  IDs <- sapply(strsplit(counties$names, ":"), function(x) x[1])
+  counties_sp <- map2SpatialPolygons(counties, IDs=IDs,
+                                     proj4string=CRS("+proj=longlat +datum=WGS84"))
+  
+  # Convert pointsDF to a SpatialPoints object 
+  pointsSP <- SpatialPoints(data.frame(long=long, lat=lat), 
+                            proj4string=CRS("+proj=longlat +datum=WGS84"))
+  
+  # Use 'over' to get _indices_ of the Polygons object containing each point 
+  indices <- over(pointsSP, counties_sp)
+  
+  # Return the county names of the Polygons object containing each point
+  countyNames <- sapply(counties_sp@polygons, function(x) x@ID)
+  countyNames[indices]
+}
+
+raw_NSG <- read_csv("Data/raw_NSG.csv")
+
+geocoded <- raw_NSG %>%
+  select(npi, street, city, state, zip) %>%
+  unique() %>%
+  left_join(select(sf_zip@data, zip=GEOID10, lat=INTPTLAT10, lon=INTPTLON10)) %>%
+  mutate(
+    lat = as.numeric(lat),
+    lon = as.numeric(lon)
+  )
+
+geocoded_missing <- geocoded %>%
+  filter(is.na(lat)|is.na(lon)) %>%
+  mutate(address = glue::glue("{city}, {state}, {zip}")) %>%
+  select(npi, address) %>%
+  unique()
+
+google_geocoded <- geocoded_missing %>%
+  select(address) %>%
+  unique() %>%
+  mutate_geocode(address, output="more")
+
+
+# Re-write `geocoded` with missing values filled in
+geocoded <- left_join(geocoded_missing, google_geocoded) %>%
+  right_join(
+    select(filter(geocoded, is.na(lat)|is.na(lon)), -lon, -lat)
+  ) %>%
+  mutate(zip=NA) %>%
+  select(npi, street, city, state, zip, lat, lon) %>%
+  bind_rows(.,
+    filter(geocoded, !is.na(lat), !is.na(lon))
+  )
+rm(geocoded_missing, google_geocoded)
+
+
+
+
+
+geocoded2 <- geocoded %>%
+  mutate(county_name = latlong2county(lon, lat)) %>%
+  left_join(
+    {county.fips %>%
+      rename(county_name=polyname, county_FIPS=fips) %>%
+      mutate(county_name = str_replace(county_name, ":.*", "")) %>%
+      unique()}
+    )
+
+
+tictoc::tic("Calling cenus")
+missing_geoid <- geocoded2 %>%  # takes a little over 1 min
+  filter(is.na(county_FIPS)) %>%
+  append_geoid(geoid_type = "county") %>%
+  mutate(county_FIPS=geoid)
+tictoc::toc()
+beepr::beep()
+
+geo_final <- bind_rows(
+  select(missing_geoid, -geoid),
+  mutate(filter(geocoded2, !is.na(county_FIPS)), county_FIPS=as.character(county_FIPS))
+) %>%
+  mutate(county_FIPS=str_pad(county_FIPS, 5, pad="0"))
+
+write_csv(geo_final, "geocode_npi.csv")
+rm(geocoded, missing_geoid, geocoded2, latlong2county)
+```
+
+
+```{r readraw_NSG}
+geo_npi <- read_csv("Data/geocode_npi.csv")
+```
+
+
+# Create datasets
+
+## Services
+
+- **NPI**
+- **accptMedicare**
+- **place_of_service**: Identifies whether the place of service submitted on the claims is a facility (value of ‘F’) or non-facility (value of ‘O’). Non-facility is generally an office setting
+- **hcpcs_code**: Healthcare Common Procedure Coding System (HCPCS) code for the specific medical service furnished by the provider
+- **hcpcs_description**: Description of the HCPCS code for the specific medical service furnished by the provider. HCPCS descriptions associated with CPT codes are consumer friendly descriptions provided by the AMA.
+- **drug**: Identifies whether the HCPCS code for the specific service furnished by the provider is a HCPCS listed on the Medicare Part B Drug Average Sales Price (ASP) File
+- **num.services**: Number of services provided; note that the metrics used to count the number provided can vary from service to service
+- **num.bene_uniq**: Number of distinct Medicare beneficiaries receiving the service.
+- **avg.allowed_amt**: Average of the Medicare allowed amount for the service; _this figure is the sum of the amount Medicare pays, the deductible and coinsurance amounts that the beneficiary is responsible for paying, and any amounts that a third party is responsible for paying._
+- **avg.submitted_chrg**: Average of the charges that the provider submitted for the service.
+- **avg.paid**: Average amount that Medicare paid after deductible and coinsurance amounts have been deducted for the line item service
+- **avg.paid_std**: Average amount that Medicare paid after beneficiary deductible and coinsurance amounts have been deducted for the line item service and after standardization of the Medicare payment has been applied.
+
+```{r}
+services <- NSG %>% select(npi, accptMedicare:avg.paid_std)
+```
+
+## Providers
+
+```{r}
+providers <- NSG %>%
+  group_by(npi, place_of_service) %>%
+  summarise(srvc_uniq = sum(num.bene_uniq)) %>%
+  spread(place_of_service, srvc_uniq, fill = 0) %>%
+  rename(inpatient=`F`, office=`O`) %>%
+  
+  # Join to rest of npi data
+  right_join(unique(select(NSG, npi:gender))) %>%
+  
+  left_join(geo_npi)
+
+# colSums(is.na(providers))
+```
+
+
+# Maps
+
+
+
+
+```{r basicMap}
+df <-  population %>%
+  # filter(!str_detect(GEOID, "72..."), !str_detect(GEOID, "02..."),
+  #        !str_detect(GEOID, "15...")) %>%
+  filter(!str_detect(GEOID, "72...")) %>%
+  select(GEOID, NAME, population=estimate, geometry) %>%
+  left_join(., by=c("GEOID"="county_FIPS"),
+    summarise(group_by(providers, county_FIPS), NPIs=n())) %>%
+  
+  mutate(Ratio = NPIs*100000/population) %>%
+  mutate(Ratio_bin = cut(Ratio, c(0:2, 4, 6, Inf),
+                         right=F)) 
+
+
+df %>%
+  filter(!is.na(NPIs)) %>%
+  # mutate(Ratio = ifelse(Ratio>7, 7, Ratio)) %>%
+
+  ggplot(aes(x=Ratio_bin, fill=Ratio_bin)) +
+  geom_bar()
+  geom_histogram()
+  
+
+
+
+tictoc::tic("Start plot")
+
+df %>% # per 100,000 population
+  
+  ggplot(aes(fill = Ratio_bin)) +
+  geom_sf() +
+  coord_sf(crs = 26914) +
+  scale_fill_brewer(palette="PiYG", na.value="grey50", direction=1,
+                    name="Ratio Per 100k") +
+  theme(legend.direction="horizontal",legend.position=c(0.5,0))
+  # scale_fill_gradientn(colours = terrain.colors(5), na.value = "grey50")
+tictoc::toc()
+```
+
+
+# Injury data
+
+Using the CDC's WISQARS database, I downloaded the **age-adjusted rates** per 100,000 Population for each county of fatal TBI injuries (all intents, all mechanisms, all ages, all race/ethnicity, both sexes) from 2008-2014. It's based on the 2000 standard population (all races, both sexes). Data was downloaded on 1/17/2020
+
+Produced by: the Statistics, Programming & Economics Branch, National Center for Injury Prevention & Control, CDC    
+Data Sources: NCHS National Vital Statistics System for numbers of deaths; US Census Bureau for population estimates
+
+```{r}
+TBIs <- read_csv("Data/TBI_Deaths.csv")
+  # mutate(
+  #   AgeAdj_Rate = scales::squish(AgeAdj_Rate, range = c(0,50)),
+  #   Crude_Rate  = scales::squish(Crude_Rate, range = c(0,50))
+  # ) 
+```
+
+The distribution of the rates of TBIs has a few outliers, including McKenzie County, ND
+
+```{r}
+# TBIs %>%
+#   mutate(
+#     AgeAdj_Rate = scales::squish(AgeAdj_Rate, range = c(0,75)),
+#     Crude_Rate  = scales::squish(Crude_Rate, range = c(0,75))
+#   )  %>%
+#   mutate(Decile = factor(ntile(Crude_Rate, 10))) %>%
+#   
+#   ggplot(aes(x=Crude_Rate, y=Population, color=percent_rank(Crude_Rate))) + geom_jitter() +
+#   scale_color_distiller(palette="RdYlBu", direction = -1, guide = 'legend')
+#   scale_fill_gradientn(guide = 'legend', colours = brewer.pal(n = 9, name = 'Reds'))
+#   
+# 
+
+
+county_laea %>%
+  inner_join(TBIs, by=c("GEOID"="CountyFIPS")) %>%
+  ggplot(aes(fill = percent_rank(Crude_Rate))) +
+  geom_sf() +
+  coord_sf(crs = 26914) +
+  scale_fill_distiller(palette="RdYlBu", direction = -1, guide = 'legend',
+                       labels=scales::percent, name="%tile rank of TBI deaths") +
+  theme(legend.direction="horizontal",legend.position=c(0.5,0))
+```
+
+# Leaflet
+
+```{r}
+leaflet_df <- population_leaflet %>%
+  left_join(by=c("GEOID"="CountyFIPS"),
+            TBIs) %>%
+  left_join(by=c("GEOID"="county_FIPS"),
+            summarise(group_by(providers, county_FIPS), NPIs=n())
+  ) %>%
+  replace_na(list(NPIs=0)) %>%
+  sf::st_transform(4326) %>%
+  filter(!str_detect(GEOID, "72..."), !str_detect(GEOID, "02..."),
+         !str_detect(GEOID, "15...")) %>%
+  mutate(
+    Percentile_TBI = percent_rank(Crude_Rate),
+    # TBI_label = glue::glue("{NAME}\n\n{round(Crude_Rate, 1)}"),
+    Ratio = NPIs*100000/estimate,
+    Ratio = ifelse(Ratio==0, NA, Ratio),
+    # Popup_text = paste0("<b>",NAME,"</b><br>Crude Rate: ",Crude_Rate)
+    Popup_text = glue::glue("<h3>{NAME}</h3><br><b>TBI deaths:</b> {round(Crude_Rate,1)} per 100k<br>
+                            <b>Percentile rank:</b> {round(Percentile_TBI*100)}<hr>
+                            <b>Number of neurosurgeons:</b> {NPIs}<br>
+                            <b>NSG per 100k:</b> {round(Ratio,1)}<br>")
+  ) 
+
+npi_pal <- colorBin("YlGnBu", domain=leaflet_df$Ratio, 
+                    bins=c(0:2, 4, 6, Inf),
+                    na.color="#C0C0C0")
+tbi_pal <- colorQuantile("RdYlBu", na.color="#C0C0C0", reverse=T, 
+                         domain=leaflet_df$Crude_Rate)  
+  
+  
+leaflet_df %>%
+  leaflet() %>%
+  addProviderTiles("CartoDB.Positron", group="Base") %>%
+  addProviderTiles("Stamen.TonerLabels", group = "Base") %>%
+  
+  
+  # %tile rank of county's crude rate of TBI deaths
+  addPolygons(
+    fillColor = ~tbi_pal(Crude_Rate), 
+    stroke=F, fillOpacity=0.75,
+    highlight = highlightOptions(
+      weight=5, color="#666", fillOpacity=0.5, bringToFront=T),
+    label = ~NAME, popup = ~Popup_text,
+    group = "TBI"
+  ) %>%
+  
+  # Ratio of NPIs to 100k population
+  addPolygons(
+    # fillColor = ~colorNumeric("PiYG", Ratio, na.color="grey50")(Ratio), 
+    fillColor = ~npi_pal(Ratio),
+    stroke=F, fillOpacity=0.9,
+    highlight = highlightOptions(
+      weight=5, color="#666", fillOpacity=0.5, bringToFront=T),
+    label = ~NAME, popup = ~Popup_text,
+    group = "NPIs"
+  ) %>%
+  
+  # population
+  addPolygons(
+    fillColor = ~colorNumeric("viridis", log(estimate))(log(estimate)),
+    stroke = FALSE, group = "population"
+  ) %>%
+  
+  # legends
+  addLegend(pal = tbi_pal, values = ~Crude_Rate,
+            opacity = 0.7, title = "%tile rank TBI deaths",
+            position = "bottomright", group="TBI") %>%
+  addLegend(pal = npi_pal, values = ~Ratio,
+            opacity = 0.7, title = "NSG per 100k",
+            position = "bottomleft", group="NPIs") %>%
+  
+  # Control layers
+  addLayersControl(
+    baseGroups = c("TBI", "NPIs", "Population"),
+    options = layersControlOptions(collapsed = FALSE)
+  )
+```
+
+# Find neighbors by distance
+
+```{r, eval=F}
+options(tigris_class = "sf")
+TX <- counties("TX", cb=T)
+
+function_X <- function(geo_sf) {
+  
+  # Counties w/o providers
+  missing <- geo_sf %>%
+    filter(!GEOID %in% providers$county_FIPS) %>%
+    # sample_n(5) %>%
+    sf::as_Spatial() %>%
+    coordinates()
+  
+  has_providers <- geo_sf %>%
+    filter(GEOID %in% providers$county_FIPS) %>%
+    sf::as_Spatial() %>%
+    coordinates()
+  
+  dist.mat <- geosphere::dist2Line(p = missing, line = has_providers)
+  cbind(missing, dist.mat)
+}
+
+X <- function_X(TX)
+dimnames(X)[[2]] <- c("lon0", "lat0", "distance", "lon", "lat")
+
+
+providers %>%
+  filter(state=="TX") %>%
+  ungroup() %>% count(county_FIPS, county_name)
+
+
+
+fortify(TX) %>%
+  ggplot() +
+  geom_map(aes(x=long, y=lat, map_id=id),
+           map=fortify(TX),
+           color="black", fill="white", size=0.25) +
+  coord_quickmap()
+```
+
+
+```{r, eval=F}
+TX <- counties("TX", cb=T)
+TX$id <- 1:nrow(TX)
+
+coords <- providers %>% 
+  filter(state=="TX") %>%
+  ungroup() %>% 
+  select(lon, lat) %>% 
+  sample_n(10) %>%
+  unique() %>%
+  as.matrix() 
+
+dnearneigh(coordinates(TX), 0, 50, longlat = T) %>%
+  plot(coordinates(TX))
+  
+dnearneigh(coordinates(TX), 0, 40, longlat = T) %>%
+  # plot(coordinates(TX))
+  include.self() %>%
+  nb2listw()
+
+  dnearneigh(coordinates(TX), 0, 50, longlat = TRUE)
+
+
+plot(TX)
+pts <- locator(5,type="p")
+geosphere::dist2Line(p = SpatialPoints(pts), line = TX)
+
+pts2 <- sp::makegrid(wrld_simpl, n = 5)
+apply(gDistance(SpatialPoints(pts, proj4string=CRS(proj4string(TX))), TX,byid=TRUE),2,min)
+
+geosphere::dist2Line
+
+
+```
+
+
+# Google Maps Geocode
+
+```{r}
+# ggeocode <- providers %>%
+#   mutate(address = str_glue("{firstName} {lastName} neurosurgeon")) %>%
+#   ungroup() %>%
+#   sample_n(10) %>%
+#   mutate_geocode(location = address, output = "more")
+```
+
+# Useful links
+
+http://personal.tcu.edu/kylewalker/spatial-neighbors-in-r.html
+
+https://gist.github.com/walkerke/6915b02ac7f0c215bc2c75a687b3d269
+
+[Calculating distance](https://gis.stackexchange.com/questions/225102/calculate-distance-between-points-and-nearest-polygon-in-r/254310)
+
+[Filtering with TIGRIS](https://www.r-bloggers.com/generating-metropolitan-subsets-of-census-data-with-r-and-tigris/)
+

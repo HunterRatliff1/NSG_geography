@@ -1,0 +1,1077 @@
+---
+title: "Workflow"
+author: "Hunter Ratliff"
+date: "1/27/2020"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+    
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=T, warning=F, message=F)
+
+library(magrittr)
+library(testthat)
+library(ggmap)
+library(viridis)
+library(tictoc)
+library(RColorBrewer)
+library(BAS)
+library(rgeos)
+library(spdep)
+library(sp)
+library(maps)
+library(maptools)
+library(ggthemes)
+library(sf) # newer, better version of sp
+library(tigris)
+library(leaflet)
+library(sjPlot);theme_set(theme_sjplot()) # for lm plots
+library(tidycensus)
+library(tidyverse)
+
+options(tigris_class = "sf")
+options(tigris_use_cache = TRUE)
+```
+
+# Sources of Data
+
+## Shapefiles
+
+First, we'll load in some of the data that's already been created. To begin, let's get the shapefiles of all the counties in the continental US using the [tigris](https://github.com/walkerke/tigris) package
+
+```{r tigris-data}
+US_counties <- tigris::counties(state = c(state.abb, "DC"), cb=T) %>%
+  filter(STATEFP!="02", STATEFP!="15")
+```
+
+## TBI Injury
+
+Using the CDC's WISQARS [database](https://wisqars.cdc.gov:8443/cdcMapFramework/), I downloaded the crude rates per 100,000 Population for each county of fatal TBI injuries (all intents, all mechanisms, all ages, all race/ethnicity, both sexes) from 2008-2014. It's based on the 2000 standard population (all races, both sexes). Data was downloaded on 1/17/2020
+
+Produced by: the Statistics, Programming & Economics Branch, National Center for Injury Prevention & Control, CDC    
+Data Sources: NCHS National Vital Statistics System for numbers of deaths; US Census Bureau for population estimates
+
+```{r TBI-data}
+TBIs <- read_csv("Data/TBI_Deaths.csv") %>%
+  # Correct Shannon, SD to it's new name
+  mutate(
+    CountyFIPS = ifelse(CountyFIPS=="46113", "46102", CountyFIPS),
+    County     = ifelse(CountyFIPS=="46102", "OGLALA LAKOTA", County))
+
+```
+
+The distribution of the rates of TBIs has a few outliers, including McKenzie County, ND
+
+## Trauma centers
+
+There's also a csv of the trauma centers that I scraped from the [American College of Surgeons website](https://www.facs.org/search/trauma-centers?country=united%20states&n=250) using the package [rvest](https://github.com/tidyverse/rvest). My workflow is in the chunk below^[Also can be found in the R script `Find trauma centers.R`] (not run), which saved the results to `TraumaCenters.csv`
+
+```{r scrapeTrauma, eval=FALSE}
+###############################
+###         NOT RUN         ###
+###############################
+library(rvest)
+library(tidyverse)
+
+############################       This data was originally downloaded
+###   Call the results   ###       on Jan 20th 2020
+############################
+trauma_pg1 <- read_html("https://www.facs.org/search/trauma-centers?country=united%20states&n=250") %>%
+  html_nodes(".searchResults li , #content_element_0_acsCol9MainColumn h3")
+trauma_pg2 <- read_html("https://www.facs.org/search/trauma-centers?country=united%20states&n=250&page=2") %>%
+  html_nodes(".searchResults li , #content_element_0_acsCol9MainColumn h3")
+trauma_pg3 <- read_html("https://www.facs.org/search/trauma-centers?country=united%20states&n=250&page=3") %>%
+  html_nodes(".searchResults li , #content_element_0_acsCol9MainColumn h3")
+
+
+
+############################
+##   Make a single list   ##
+############################
+x <- c(html_text(trauma_pg1), html_text(trauma_pg2), html_text(trauma_pg3))
+
+#################################
+##   Make in to a data.frame   ##
+#################################
+df <- x %>%
+  matrix(byrow=T,
+         nrow=length(x)/5, 
+         ncol=5) %>%
+  as.data.frame() %>%
+  select(-V1) %>%
+  as_tibble()
+
+names(df) <- c("CenterName", "Address", "Country", "Level")
+
+df <- df %>% 
+  mutate(
+    Level = str_replace(Level, "Level/Details ", ""),
+    Level = str_replace(Level, " Trauma Center", "")
+    ) %>%
+  
+  mutate(
+    LevelFull = Level,
+    Level = case_when(
+      Level == "Level I Adult, Level I Pediatric"   ~ "Level I",
+      Level == "Level II Adult, Level II Pediatric" ~ "Level II",
+      Level == "Level I Adult, Level II Pediatric"  ~ "Level I",
+      Level == "Level I Pediatric"                  ~ "Level I",
+      Level == "Level II Pediatric"                 ~ "Level II",
+      T                                             ~ Level
+    )
+  ) 
+
+rm(trauma_pg1, trauma_pg2, trauma_pg3, x)
+
+#####################
+##  Write to CSV   ##
+#####################
+df %>% write_csv("Data/TraumaCenters.csv")  
+```
+
+I don't really use it for much in this analysis, since I'm still waiting to see if I can get a more comprehensive list from the [American Trauma Society](https://www.amtrauma.org/page/tiep).
+
+```{r traumaCenters-data}
+traumaCenters <- read_csv("Data/TraumaCenters.csv")
+```
+
+
+## Medicare data
+
+Our main source of data is from the 2017 [Medicare Provider Utilization and Payment Data: Physician and Other Supplier](https://www.cms.gov/Research-Statistics-Data-and-Systems/Statistics-Trends-and-Reports/Medicare-Provider-Charge-Data/Physician-and-Other-Supplier2017) dataset. This data can be downloaded from this page, but contains over 9 million records and is 2 GB unzipped.
+
+The code chunk below downloads the whole dataset (`rawdata`), subsets it to select only neurosurgeons (`raw_NSG`) and writes that subset to a CSV. Because the full dataset is so large I only run this step once, and all future code will rely on `raw_NSG.csv`
+
+```{r loadFullData, eval=FALSE}
+###############################
+###         NOT RUN         ###
+###############################
+
+## Using RSocrata
+rawdata <- "https://data.cms.gov/resource/fs4p-t5eq.csv" %>%
+  read.socrata() %>%
+  as_tibble()
+beepr::beep()
+
+## Using downloaded file
+file_location <- paste0("~/Downloads/Medicare_Provider_Util_Payment_PUF_CY2017/",
+                        "Medicare_Provider_Util_Payment_PUF_CY2017.txt")
+
+rawdata <- readr::read_delim(file_location, "\t", escape_double=F, trim_ws=T)
+rm(file_location)
+
+
+
+## Select only Neurosurgery
+raw_NSG <- rawdata  %>% 
+  filter(npi!="0000000001") %>%
+  filter(provider_type=="Neurosurgery") %>%
+  rename(street=nppes_provider_street1, city=nppes_provider_city, 
+         state=nppes_provider_state, country=nppes_provider_country,
+         zip=nppes_provider_zip,
+         
+         lastName=nppes_provider_last_org_name,
+         firstName=nppes_provider_first_name,
+         gender=nppes_provider_gender) %>%
+  select(-nppes_provider_mi, -nppes_provider_street2) %>%
+  mutate(zip = str_trunc(zip, 5, "right", ellipsis = ""))
+
+write_csv(raw_NSG, "Data/raw_NSG.csv")
+rm(rawdata, raw_NSG)
+```
+
+It is from this dataset that the goecoding was done, using a few different methods. These methods of geocoding are described in the next section, but for reference the columns in the _Medicare Provider Utilization and Payment Data_ file are below:
+
+```{r, echo=F, collapse=T}
+print("Glimpse of the raw_NSG.csv")
+read_csv("Data/raw_NSG.csv") %>% glimpse()
+```
+
+I renamed some of the key varaibles below (with descriptions)
+
+```{r read_NSG}
+NSG <- read_csv("Data/raw_NSG.csv") %>%
+  rename(degree=nppes_credentials) %>%
+  mutate(degree = str_replace_all(degree, "\\.","")) %>%
+  
+  # Rename vars
+  rename(drug=hcpcs_drug_indicator,
+         accptMedicare=medicare_participation_indicator,
+         
+         num.services       = line_srvc_cnt,
+         num.bene_uniq      = bene_unique_cnt,
+         avg.allowed_amt    = average_Medicare_allowed_amt,
+         avg.submitted_chrg = average_submitted_chrg_amt,
+         avg.paid           = average_Medicare_payment_amt,
+         avg.paid_std       = average_Medicare_standard_amt) %>%
+  
+  # Select only relevant vars
+  select(-nppes_entity_code, -provider_type,
+         -bene_day_srvc_cnt) %>%
+  select(npi:gender, accptMedicare:avg.paid_std)
+```
+
+- **NPI**
+- **accptMedicare**: If they accept medicare
+- **place_of_service**: Identifies whether the place of service submitted on the claims is a facility (value of ‘F’) or non-facility (value of ‘O’). Non-facility is generally an office setting
+- **hcpcs_code**: Healthcare Common Procedure Coding System (HCPCS) code for the specific medical service furnished by the provider
+- **hcpcs_description**: Description of the HCPCS code for the specific medical service furnished by the provider. HCPCS descriptions associated with CPT codes are consumer friendly descriptions provided by the AMA.
+- **hcpcs_drug_indicator**: Identifies whether the HCPCS code for the specific service furnished by the provider is a HCPCS listed on the Medicare Part B Drug Average Sales Price (ASP) File
+- **num.services**: Number of services provided; note that the metrics used to count the number provided can vary from service to service
+- **num.bene_uniq**: Number of distinct Medicare beneficiaries receiving the service.
+- **avg.allowed_amt**: Average of the Medicare allowed amount for the service; _this figure is the sum of the amount Medicare pays, the deductible and coinsurance amounts that the beneficiary is responsible for paying, and any amounts that a third party is responsible for paying._
+- **avg.submitted_chrg**: Average of the charges that the provider submitted for the service.
+- **avg.paid**: Average amount that Medicare paid after deductible and coinsurance amounts have been deducted for the line item service
+- **avg.paid_std**: Average amount that Medicare paid after beneficiary deductible and coinsurance amounts have been deducted for the line item service and after standardization of the Medicare payment has been applied.
+
+
+
+
+# Geocoding
+
+The Medicare datafile contains quite a bit of information about the providers, including their names (first and last) and the address associated with their NPI (street, city, zip, country). However, this information isn't useful by itself so I had to do some [geocoding](https://en.wikipedia.org/wiki/Geocoding) to match it to locations. I used a few different methods outlined below
+
+## County, by reported zipcode
+
+The first method used zipcodes to match providers to counties. To illustrate how this worked, see the sample map below showing Dallas county (grey box) and nearby ZIP Code Tabulation Areas (blue shapes). 
+
+```{r DallasEx1, echo=F}
+TX_County <- tigris::counties(state = "TX", cb=T) %>%
+  filter(NAME=="Dallas") # only get dallas county
+TX_zips   <- tigris::zctas(cb=T, starts_with = c("75")) %>%
+  filter(ZCTA5CE10!="75119")
+
+ex_pts <- tibble(
+  lon = c(-96.616826),
+  lat = c(32.583212)
+) %>%
+st_as_sf(coords = c("lon", "lat"), crs=4269) 
+
+
+TX_zips[TX_County,] %>% # subset only zipcodes that intersect Dallas county
+  ggplot() +
+  geom_sf(color="#00008B", fill=NA) +
+  geom_sf(data=TX_County, fill="black", color=NA, alpha=0.3) +
+  ggthemes::theme_map()
+```
+
+The first step was to match a provider's reported zipcode to shapefiles of ZIP Code Tabulation Areas (ZCTAs^[technically they aren't the same thing]). With providers categorized into their zipcodes, I then needed to group those together into counties. This wasn't perfect, as zipcodes can cross counties and zipcodes can change [monthly](https://opendata.stackexchange.com/questions/4335/mapping-counties-to-zip-codes). To approximate, I took the internal point of each ZCTA to give me "coordinates^[The majority of providers had matches based on zipcodes alone (4345 of 4521) but about 4% didn't match. For those who did **NOT** match based on ZCTAs, I geocoded their reported address location using Google's API to find their longitude and latitude.]" for that ZCTA (shown as blue triangles in the next figure). Finally I took these coordinates and found which county they fell into.
+
+```{r DallasEx2, echo=F}
+last_plot() +
+  geom_sf(color="black", fill=NA) +
+  geom_sf(data=filter(TX_zips, ZCTA5CE10=="75125"), color="green", fill=NA) +
+  geom_sf(data=st_centroid(TX_zips[TX_County,]), shape=2, color="blue") +
+  geom_sf(data=ex_pts, shape=4, color="red") 
+rm(TX_County, TX_zips, ex_pts)
+```
+
+This method of geocoding was easy, but had some problems. For one, it failed to give a point estimate of where providers were and only gave zipcodes. To make matters worse the zipcodes and counties don't always match up, as shown by the hypothetical provider (red X) in the bottom-right corner of the figure above. If the red 'X' represents their true location, I'm only able to tell their ZCTA (outlined in green). And if I try to merge those ZCTAs into counties, this ZCTA wouldn't even fall into Dallas County because the blue triangle is outside of the box.
+
+```{r callGeocoding, eval=FALSE}
+###############################
+###         NOT RUN         ###
+###############################
+
+## WARNING: This is a massive file. The code also needs to use class=sp objects
+sf_zip    <- tigris::zctas(cb=F, class="sp")
+
+
+## Function to take coordinates, and return the name of the county
+latlong2county <- function(long, lat) {
+  library(sp)
+  library(maps)
+  library(maptools)
+  # Prepare SpatialPolygons object with one SpatialPolygon
+  # per county
+  counties <- map('county', fill=TRUE, col="transparent", plot=FALSE)
+  IDs <- sapply(strsplit(counties$names, ":"), function(x) x[1])
+  counties_sp <- map2SpatialPolygons(counties, IDs=IDs,
+                                     proj4string=CRS("+proj=longlat +datum=WGS84"))
+  
+  # Convert pointsDF to a SpatialPoints object 
+  pointsSP <- SpatialPoints(data.frame(long=long, lat=lat), 
+                            proj4string=CRS("+proj=longlat +datum=WGS84"))
+  
+  # Use 'over' to get _indices_ of the Polygons object containing each point 
+  indices <- over(pointsSP, counties_sp)
+  
+  # Return the county names of the Polygons object containing each point
+  countyNames <- sapply(counties_sp@polygons, function(x) x@ID)
+  countyNames[indices]
+}
+
+raw_NSG <- read_csv("Data/raw_NSG.csv")
+
+geocoded <- raw_NSG %>%
+  select(npi, street, city, state, zip) %>%
+  unique() %>%
+  left_join(select(sf_zip@data, zip=GEOID10, lat=INTPTLAT10, lon=INTPTLON10)) %>%
+  mutate(
+    lat = as.numeric(lat),
+    lon = as.numeric(lon)
+  )
+
+geocoded_missing <- geocoded %>%
+  filter(is.na(lat)|is.na(lon)) %>%
+  mutate(address = glue::glue("{city}, {state}, {zip}")) %>%
+  select(npi, address) %>%
+  unique()
+
+google_geocoded <- geocoded_missing %>%
+  select(address) %>%
+  unique() %>%
+  mutate_geocode(address, output="more")
+
+
+# Re-write `geocoded` with missing values filled in
+geocoded <- left_join(geocoded_missing, google_geocoded) %>%
+  right_join(
+    select(filter(geocoded, is.na(lat)|is.na(lon)), -lon, -lat)
+  ) %>%
+  mutate(zip=NA) %>%
+  select(npi, street, city, state, zip, lat, lon) %>%
+  bind_rows(.,
+    filter(geocoded, !is.na(lat), !is.na(lon))
+  )
+rm(geocoded_missing, google_geocoded)
+
+
+
+
+
+geocoded2 <- geocoded %>%
+  mutate(county_name = latlong2county(lon, lat)) %>%
+  left_join(
+    {county.fips %>%
+      rename(county_name=polyname, county_FIPS=fips) %>%
+      mutate(county_name = str_replace(county_name, ":.*", "")) %>%
+      unique()}
+    )
+
+
+tictoc::tic("Calling cenus")
+missing_geoid <- geocoded2 %>%  # takes a little over 1 min
+  filter(is.na(county_FIPS)) %>%
+  append_geoid(geoid_type = "county") %>%
+  mutate(county_FIPS=geoid)
+tictoc::toc()
+beepr::beep()
+
+geo_final <- bind_rows(
+  select(missing_geoid, -geoid),
+  mutate(filter(geocoded2, !is.na(county_FIPS)), county_FIPS=as.character(county_FIPS))
+) %>%
+  mutate(county_FIPS=str_pad(county_FIPS, 5, pad="0"))
+
+write_csv(geo_final, "geocode_npi.csv")
+rm(geocoded, missing_geoid, geocoded2, latlong2county)
+```
+
+```{r, echo=F}
+geo_v1 <- read_csv("Data/geocode_npi.csv")
+```
+
+
+Another problem came to my attention from the data itself: many of the addresses associated with the NPIs were out of date. It was for these reasons that I did an additional form of geocoding.
+
+## Provider name via Google
+
+This is more fully documented in `Geocode_with_google.Rmd`, but briefly I used the [Google Maps API](https://developers.google.com/maps/documentation/geocoding/intro) to get the associated coordinates for each provider. Unlike the prior section where we used the provided address, I did this geocoding using _their names_. I just searched the API for `{First Name}` + `{Last Name}` + `neurosurgeon` and returned the first location result^[96.5% returned a result on this first pass. See the seperate Rmd file for details].
+
+```{r}
+geo_google <- read_csv("Google_results/geo_google_raw.csv")
+
+provs <- geo_google %>%
+  filter(geoState!="hi", geoState!="ak") %>%
+  st_as_sf(coords = c("lon", "lat"), crs=4269)
+```
+
+
+# Finding the distance
+
+The whole point of finding the coordinates for all the providers is so that we can calculate the distance from each county to the nearest provider. The function below attempts to accomplish this. 
+
+The first argument (`county_sf`) should be the geometries of the counties^[It'll throw an error if the geometry isn't a multipolygon] and the second (`prov_sf`) a sf object with the points of the providers.
+
+This function works in two main steps. First, for each feature/geometry (i.e. county) in `county_sf`, it finds the nearest point (i.e. provider) in `prov_sf`. It then calculates the distance from the identified provider to the county. If the centroid flag is TRUE (default), it calculates the distance from the provider to the centroid of the county. Otherwise, it finds the minimum distance from the edge of the county to the provider identified in the first step^[This has the added benifit of marking counties that have a provider anywhere within the county as having a distance of 0 miles].
+
+Please note that in the first step, this function finds the closest provider **based on the closest edge of the county**. It behaves this way **REGARDLESS of the centroid flag**.
+
+```{r closestFxn}
+find_closest <- function(county_sf, prov_sf, centroid=T, timer=F) {
+  
+  if(timer) tic() # time the function
+  library(testthat)
+  
+  test_that("inputs are sf objects", {
+    expect_s3_class(county_sf, "sf")
+    expect_s3_class(prov_sf, "sf")
+  })
+  
+  test_that("Correct geometries", {
+    county_sf_geo <- as.character(st_geometry_type(county_sf)[[1]])
+    expect_equal(county_sf_geo, "MULTIPOLYGON")
+    prov_sf_geo <- as.character(st_geometry_type(prov_sf)[[1]])
+    expect_equal(prov_sf_geo, "POINT")
+  })
+  
+  
+  
+  
+  # Finds index of nearest provider for each county
+  i <- st_nearest_feature(county_sf, prov_sf)
+  p <- prov_sf[i,]
+  
+  # Calculate distance for each element
+  if(centroid){
+    
+    distance <- st_distance(p, st_centroid(county_sf), by_element=T)
+  } else({
+    
+    distance <- st_distance(p, county_sf, by_element=T)
+  })
+  
+  
+  # Create a data frame with results
+  df <- tibble(
+    GEOID         = county_sf$GEOID,
+    npi           = p$npi,
+    providerCity  = p$geoCity,
+    providerST    = p$geoState,
+    Distance      = units::set_units(distance, mi),
+    Distance_m    = distance
+  ) %>%
+  mutate(
+    Distance = as.numeric(Distance)
+  )
+  
+  # Join to county_sf to make sf object
+  df_sf <- geo_join(county_sf, df, by="GEOID") 
+  
+   
+  if(timer) toc() # end timer
+  return(df_sf)
+}
+```
+
+To illustrate how this works in practice, take these hypothetical situations below focusing on just one county. In reality it does the steps below for every county, but for simplicity we'll just look at one
+
+```{r closest_demo_fxn, echo=F}
+# Equivalant of county_sf in the other function,
+# but only one county
+poly_sf <- st_polygon(
+  list(matrix(c(0, 8,8,0,0,0,0,6,6,0), nrow=5, ncol=2))
+)
+
+
+closest_demo <- function(pts_sf, poly_sf=NULL, centroid=T) {
+  
+  # Equivalant of county_sf in the other function,
+  # but only one county
+  # poly_sf <- st_polygon(
+    # list(matrix(c(0, 20,20,0,0,0,0,10,10,0)/2, nrow=5, ncol=2))
+  # )
+  
+  
+  # Finds index of nearest provider for the county
+  i <- st_nearest_feature(poly_sf, pts_sf)
+  p <- pts_sf[i,]
+  
+  # Calculate distance for each element
+  pts_sf %>%
+    mutate(closest = if_else(id==p$id, T, F)) %>%
+    mutate(
+      dist_min  = st_distance(poly_sf, pts_sf, by_element=T),
+      dist_cent = st_distance(st_centroid(poly_sf), pts_sf, by_element=T)
+    )
+}
+```
+
+## Demo 1
+
+When the main function is called, it finds the closest provider and returns their NPI number (shown as letters in these demos) and calculates their distance from the county based on either minimum distance (if centroid=F) or the centroid of the county (shown as the blue star). For the sake of illustration I have a table below that shows both distances for all providers, but since the dataset is so large that actual function only returns one distance from the closest provider.
+
+This demo shows how it identifies provider A as the closest (since they are in the county), and returns a minimum value of `0.00`. The centroid distance (blue line) is _not_ zero, but this is tolerable since we don't really know what point to compare them to within the county anyways
+
+```{r demo1}
+demo <- tibble(
+  x = c(2, 7, 10),
+  y = c(4, 7, 10)
+) %>%
+  mutate(id=LETTERS[row_number()],
+         xy = str_glue("({x},{y})")) %>%
+  st_as_sf(coords = c("x", "y")) %>%
+  closest_demo(poly_sf = poly_sf)
+
+ggplot(demo) +
+  annotate("segment", x=2, y=4, xend=4, yend=3,
+           color="blue", alpha=.25) +
+  geom_sf_text(aes(label=id, color=closest)) +
+  geom_sf(data=poly_sf, fill=NA) +
+  geom_sf(data=st_centroid(poly_sf), shape=8, color="blue") +
+  scale_color_brewer(palette = "Dark2")
+
+
+st_drop_geometry(demo) %>%
+  mutate_if(is.numeric, round, 2)
+```
+
+## Demo 2
+
+Now we have a situation with no points inside of the county, so the colosest point is identified as the point nearest to the edge of the county (B). The blue line shows how it measures the distance if `centroid = TRUE` and the red line shows how the minimun distance is measured if `centroid = FALSE`
+
+```{r demo2}
+demo <- tibble(
+  x = c(2, 7, 10),
+  y = c(9, 7, 10)
+) %>%
+  mutate(id=LETTERS[row_number()],
+         xy = str_glue("({x},{y})")) %>%
+  st_as_sf(coords = c("x", "y")) %>%
+  closest_demo(poly_sf = poly_sf)
+
+ggplot(demo) +
+  annotate("segment", x=7, y=7, xend=7, yend=6,
+           color="red", alpha=.25) +
+  annotate("segment", x=7, y=7, xend=4, yend=3,
+           color="blue", alpha=.25) +
+  geom_sf_text(aes(label=id, color=closest)) +
+  geom_sf(data=poly_sf, fill=NA) +
+  geom_sf(data=st_centroid(poly_sf), shape=8, color="blue") +
+  scale_color_brewer(palette = "Dark2")
+
+
+st_drop_geometry(demo) %>%
+  mutate_if(is.numeric, round, 2)
+```
+
+## Demo 3
+
+If there are multiple points within the county, it doesn't always pick the once closest to the centroid. For the life of me I can't figure out why, but it doesn't matter since as mentioned in the first example, the centroid distance doesn't mean much to us when the point is within the county anyways.
+
+```{r demo3}
+demo <- tibble(
+  x = c(2, 1, 5, 10, 4),
+  y = c(4, 1.1, 4, 10, 1)
+) %>%
+  mutate(id=LETTERS[row_number()],
+         xy = str_glue("({x},{y})")) %>%
+  st_as_sf(coords = c("x", "y")) %>%
+  closest_demo(poly_sf = poly_sf)
+
+ggplot(demo) +
+  geom_sf_text(aes(label=id, color=closest)) +
+  geom_sf(data=poly_sf, fill=NA) +
+  geom_sf(data=st_centroid(poly_sf), shape=8, color="blue") +
+  scale_color_brewer(palette = "Dark2")
+
+
+st_drop_geometry(demo) %>%
+  mutate_if(is.numeric, round, 2)
+```
+
+## Demo 4
+
+This next demonstration highlighs the other real "bug" about how this function works. When it searches for the closest point to a county and there are no points in the county, it finds the nearest point to any edge. In this case it identifies "B", which is fine if we want to know the minimum distance. However, if we actually care about the distance from the centroid of the county, when we call the function it will give us the centroid distance _for this point_ (vs the point closest to the centroid, which is "A")
+
+```{r demo4}
+demo <- tibble(
+  x = c(4, 9, 10, 10),
+  y = c(8, 7, 3, 10)
+) %>%
+  mutate(id=LETTERS[row_number()],
+         xy = str_glue("({x},{y})")) %>%
+  st_as_sf(coords = c("x", "y")) %>%
+  closest_demo(poly_sf = poly_sf)
+
+ggplot(demo) +
+  geom_sf_text(aes(label=id, color=closest)) +
+  geom_sf(data=poly_sf, fill=NA) +
+  geom_sf(data=st_centroid(poly_sf), shape=8, color="blue") +
+  scale_color_brewer(palette = "Dark2")
+
+
+st_drop_geometry(demo) %>%
+  mutate_if(is.numeric, round, 2)
+```
+
+## Running the function
+
+With all that said, let's run those functions to find out those distances, and save them to a csv. We won't _actually_ run it this time (since it takes forever), but this is the code chunk used. It saves a csv with the following columns, where `dist_cent` is the centroid distance and `dist_min` is the minimum distance (both in miles)
+
+```{r getDistances, eval=FALSE}
+###############################
+###         NOT RUN         ###
+###############################
+dist_cent <- find_closest(US_counties, provs, centroid = T) %>%
+  select(GEOID, NAME, npi:providerST, dist_cent=Distance)
+dist_min  <- find_closest(US_counties, provs, centroid = F) %>%
+  select(GEOID, NAME, npi:providerST, dist_min=Distance)
+
+# Join them together
+dist <- inner_join( 
+  st_drop_geometry(dist_cent),
+  st_drop_geometry(dist_min)
+)
+
+dist %>% write_csv("Data/Distances_by-names.csv")
+glimpse(dist)
+
+rm(dist_cent, dist_min)
+```
+
+```{r readDistances, echo=F}
+dist <- read_csv("Data/Distances_by-names.csv")
+glimpse(dist)
+```
+
+Now we want to join these distances to our other data. We'll start by getting the 2017 5-year ACS population estimates for the counties using the [tidycensus](https://walkerke.github.io/tidycensus/) package, and then we'll merge that with the TBI data. This will be saved as `mergedToTBI.csv`.
+
+
+```{r mergeToTBI, eval=FALSE}
+###############################
+###         NOT RUN         ###
+###############################
+population <- tidycensus::get_acs(geography = "county", variables = "B01001_001",
+                                  year=2017, survey = "acs5") %>%
+  select(GEOID, pop17=estimate)
+
+mergedToTBI <- dist %>%
+  # Join to 2017 acs estimates
+  left_join(population) %>%
+   # Join to TBI data
+  left_join(TBIs, by=c("GEOID"="CountyFIPS")) %>%
+  # Rename colums
+  select(GEOID, NAME, ST, dist_cent, dist_min, npi:providerST,  pop17,
+         Deaths, AgeAdj=AgeAdj_Rate, Crude=Crude_Rate, StdPop=Population) %>%
+  mutate(DataSource="Geocoded NPI names")
+
+
+## Also add the total number of providers for each county
+nProvs <- provs %>%
+  st_drop_geometry() %>%
+  count(geoCounty) %>%
+  rename(nProvs=n, GEOID=geoCounty)
+
+mergedToTBI %>%
+  left_join(nProvs) %>%
+  write_csv("Data/mergedToTBI.csv") # Write to csv
+  
+
+
+rm(population, dist, mergedToTBI, nProvs)
+```
+
+```{r readMerged, echo=F}
+dist_TBI <- read_csv("Data/mergedToTBI.csv")
+glimpse(dist_TBI)
+```
+
+# Missing data
+
+
+
+Our final dataset is supposed to include all counties in the continental US, and we seem to be missing two:
+
+```{r}
+fips_codes %>%
+  mutate(GEOID = str_c(state_code, county_code)) %>%
+  anti_join(dist_TBI, by="GEOID") %>%
+  # count(state, state_name) %>%
+  filter(!state %in% c("AS", "GU", "MP", "PR", "UM", "VI")) %>%
+  filter(!state %in% c("AK", "HI"))
+```
+
+Shannon County, SD became Oglala Lakota County in 2015, and changed FIPS codes from 46113 to 46102. It's corrected in the dataset to use 46102. The county code for Bedford County is supposed to be 51019, which is what is used in the dataset. So we have a complete dataset for the distances (good news), but we have some missing data for the TBI rates (not good news).
+
+## Missing TBI data
+
+Among the `r nrow(dist_TBI)` counties in our dataset, `r nrow(filter(dist_TBI, is.na(Deaths)))` don't have data for their TBI rates (`r scales::percent(nrow(filter(dist_TBI, is.na(Deaths))) / nrow(dist_TBI))`). On whole, these counties tended to have smaller populations and be farther from providers
+
+```{r miss_pop}
+# naniar::gg_miss_upset(dist_TBI)
+p1 <- dist_TBI %>%
+  mutate(Missing = is.na(Deaths)) %>%
+  ggplot(aes(x=pop17, fill=Missing)) +
+  geom_density(alpha=.5) +
+  scale_x_log10() +
+  labs(x="County population (log)") +
+  guides(fill=F) +
+  scale_fill_fivethirtyeight(name="Missing TBI data?") +
+  theme_bw() + theme(legend.position="bottom") 
+
+p2 <- dist_TBI %>%
+  mutate(Missing = is.na(Deaths)) %>%
+  ggplot(aes(x=dist_cent, fill=Missing)) +
+  geom_density(alpha=.5) +
+  # scale_x_log10() +
+  labs(x="Miles to nearest provider") +
+  scale_fill_fivethirtyeight(name="Missing TBI data?") +
+  theme_bw()# + theme(legend.position="bottom") 
+gridExtra::grid.arrange(p1, p2)
+rm(p1, p2)
+```
+
+
+
+According to the database's documentation, counties with 20 or fewer TBI deaths (in total) are suppressed because the estimates of the rates are unstable. 
+
+Although these estimates might be inaccurate, it'd still be nice to get an estimate of what these counties' rates might be, because it could seriously bias our results if the TBI rates are lower for these missing counties than the rates for counties that do have data. We can get an approximation of the average number of cases (and average crude rate) in missing counties for each state by back-calculating from the pooled state totals^[This comes from a seperate file, `TBI_Death_States.csv`, that has no missing data but is aggregated at the state level]. 
+
+```{r getStateTBI}
+state_TBI <- read_csv("Data/TBI_Death_States.csv")
+
+imputed <- TBIs %>%
+  mutate(missing = ifelse(is.na(Deaths),1,0))%>% # counties w/ missing get assigned 1
+  # mutate(Population = )%>% # 
+  group_by(ST) %>%
+  summarise(sumCountyDeaths = sum(Deaths,na.rm = T),
+            sumCountyPop    = sum(ifelse(!is.na(Deaths),Population,0)),    # sum of county population if county has data
+            nCounties       = n(),
+            nMissing        = sum(missing)) %>%
+  left_join(state_TBI) %>%
+  select(ST:nMissing, stPop=Population, stDeaths=Deaths) %>%
+  filter(!ST %in% c("AK", "HI")) %>%
+  mutate(diffDeaths           = stDeaths - sumCountyDeaths,
+         diffPop              = stPop - sumCountyPop,
+         avgDeaths_inMissing  = diffDeaths/nMissing,
+         estCrude             = 100000*diffDeaths/diffPop) 
+
+
+dist_TBI_imputed <- dist_TBI %>%
+  filter(is.na(Deaths)) %>%
+  left_join(select(imputed, ST,
+                   avgDeaths_inMissing,
+                   estCrude)) %>%
+  mutate(Deaths = avgDeaths_inMissing,
+         Crude  = estCrude) %>%
+  mutate(imputed=T) %>%
+  select(-avgDeaths_inMissing, -estCrude) %>%
+  bind_rows(filter(dist_TBI, !is.na(Deaths))) %>%
+  mutate(imputed = ifelse(!is.na(imputed),T,F))
+```
+
+In the chunk above, I used the state and county data to calculate:
+
+- **sumCountyDeaths:** Total number of deaths recorded in the county-level data
+- **sumCountyPop:** Sum of the population for counties with data in the county-level data
+- **nCounties:** Total number of counties in state
+- **nMissing:** Total number of counties in state with missing data
+- **stPop:** Total state population from the state-level data
+- **stDeaths:** Total state deaths from the state-level data
+- **diffDeaths:** The total number of deaths that occured in counties with missing data (`stDeaths` - `sumCountyDeaths`)
+- **diffPop:** Sum of the population of counties with missing data (i.e. population at risk) via `stPop` - `sumCountyPop`
+- **avgDeaths_inMissing:** `diffDeaths`/`nMissing`. This is our surrogate for the raw count of deaths in the county-level data
+- **estCrude:** Pooled number of missing deaths divided by the sum population of counties with missing data (per 100k). This is our surrogate for the crude rates in the county-level data
+
+Using the pooled deaths and pooled populations should allow us to have a more stable estimation (all but two states have more than 20 deaths) at the tradeoff of precision (17 states are missing data for more than 10 counties).
+
+```{r}
+imputed %>% 
+  filter(nMissing>0) %>%
+  select(ST, nMissing, diffDeaths:estCrude) %>%
+  arrange(nMissing)
+```
+
+With the these estimates in hand, the next question becomes for which counties we should impute data (if any)? As seen in the figure below, some states have relatively few missing counties (where it'd be safe to impute) but some of the states (like the belt from SD to KS) are hopeless. Even still, this imputed data should make for more pretty maps.
+
+
+```{r miss-nCounty}
+# Proportion of missing counties 2
+imputed %>%
+  filter(nMissing>1, ST!="TX") %>%
+  
+  ggplot(aes(x=nMissing, y=nCounties, label=ST)) +
+  geom_point() +
+  ggrepel::geom_label_repel(aes(fill=nMissing/nCounties, size=nMissing),
+                            min.segment.length=0) +
+  # geom_label(aes(label=ST)) +
+  scale_fill_distiller(name="% of counties\nmissing", 
+                        palette = "RdBu", #trans="sqrt",
+                        values = c(0,.1,.2,.3,.5,1),
+                        labels=scales::percent) +
+  theme(legend.direction="horizontal", legend.position = "top") +
+  guides(size=F)+
+  theme_bw() +
+  labs(x="Number of counties missing",
+       y="State's total number of counties",
+       caption="Excluding TX, which has 99 of 254 counties missing (39%)") 
+```
+
+
+
+
+```{r miss-pop}
+# Proportions missingness by population & deaths
+imputed %>%
+  filter(nMissing>1) %>%
+  mutate(PctDeathMissing = 1-(sumCountyDeaths/stDeaths)) %>%
+  mutate(PctPopMissing   = 1-(sumCountyPop/stPop)) %>%
+  ggplot(aes(x=PctPopMissing, y=PctDeathMissing)) +
+  # geom_density()
+  geom_text(aes(label=ST)) +
+  labs(x="State's population missing from county data (%)",
+       y="State's deaths missing from county data (%)") +
+  scale_x_continuous(labels=scales::percent) +
+  scale_y_continuous(labels=scales::percent) +
+  theme_bw()
+```
+
+
+
+
+
+# Correlation
+
+To begin, let's look at the correlation between the rate of TBI deaths and the county's centroid distance
+
+```{r simpleCorplot}
+dist_TBI %>%
+  filter(!is.na(Deaths)) %>%
+  mutate(HasProv = ifelse(dist_min==0, "Yes", "No")) %>%
+  ggplot(aes(x=dist_cent, y=Crude, color=HasProv)) +
+  geom_jitter(alpha=.1) +
+  geom_smooth(method="lm", se=F, color="black") +
+  scale_x_sqrt() +
+  scale_color_few(name="Provider in county?") +
+  guides(color=guide_legend(override.aes=list(alpha=1))) +
+  theme_bw() +
+  labs(x="Miles to nearest provider (centroid)",
+       y="Crude death rate per 100k") +
+  theme(legend.position = "bottom")
+```
+
+```{r simpleCorTest}
+dist_TBI %>%
+  filter(!is.na(Deaths)) %$% # note the magrittr pipe
+  cor.test(dist_cent, Crude)
+```
+
+If we do the some cor.test using the data with imputed crude rates we get:
+
+```{r corTest-imputed}
+dist_TBI_imputed %>%
+  cor.test(~dist_cent + Crude, data=.) %>%
+  pander::pander()
+```
+
+If we use the most conservative estimate and only impute the crude rates that are below average:
+
+```{r corWorstCase}
+dist_TBI_imputed %>%
+  # only orignial data | Imputed where crude is less than the mean
+  filter(!imputed | Crude<mean(dist_TBI$Crude,na.rm = T)) %>%
+  cor.test(~dist_cent + Crude, data=.) %>%
+  pander::pander()
+```
+
+
+
+## Linear models
+
+### Base model
+
+The Base model predicts crude rate based on the centroid distance and the log of the county population. While the crude rate does already incorporate the county's population into the calculation of the rate itself, we're still including county population here
+
+```{r lm}
+fit <- lm(Crude ~ dist_cent+log(pop17), data=dist_TBI) 
+summary(fit)
+# broom::augment_columns(fit, dist_TBI) %>%
+#   # ggplot(aes(x=.std.resid)) + geom_histogram()
+#   ggplot(aes(x=dist_cent)) +
+#   geom_point(aes(y=.std.resid))
+#   # geom_point(aes(y=Crude), alpha=.1) +
+#   # geom_point(aes(y=.fitted))
+
+"TODO: Density of NSG in the county which is closest"
+```
+
+### Imputed 
+
+This used the same formula as the first model, but also includes the imputed data
+
+```{r lm_impute}
+fit_impute <- dist_TBI_imputed %>%
+  lm(Crude ~ dist_cent + log(pop17), data=.)
+summary(fit_impute)
+```
+
+### Worst case
+
+Same as above, but this only includes imputed data where the crude rate is below the mean of the original dataset. This represents the "worst case" scenario
+
+```{r lm_worstCase}
+fit_worst <- dist_TBI_imputed %>%
+  # only orignial data | Imputed where crude is less than the mean
+  filter(!imputed | Crude<mean(dist_TBI$Crude,na.rm = T)) %>%
+  lm(Crude ~ dist_cent + log(pop17), data=.)
+summary(fit_worst)
+```
+
+Coefs for each model
+
+```{r}
+sjPlot::plot_models(fit, fit_impute, fit_worst, std.est = "std2", rm.terms="log(pop17)",
+                    m.labels = c("Base model", "Imputed", "Worst case"),
+                    legend.title = "Model")
+# plot_model(fit, type = "pred", terms = "dist_cent")
+```
+
+
+
+
+
+## Bayes LM
+
+Not that I know much about Bayesian linear modeling, but here's a model of the Crude Rate based on centroid distance and county population
+
+```{r Bayes}
+library(BAS)
+set.seed(1234)
+modBayes <- bas.lm(Crude ~ dist_cent+pop17,
+                     data = dist_TBI,
+                     method = "MCMC",
+                     prior = "ZS-null",
+                     modelprior = uniform())
+
+summary(modBayes)
+par(mfrow=c(2,2))
+coef(modBayes) %T>% plot(ask=F, subset=c(1:3)) %>% print()
+# image(modBayes)
+# plot(modBayes)
+```
+
+
+# Plots 
+
+Here's a few maps demonstrating the results
+
+## Select states
+
+```{r subset-states-1, echo=F, message=F}
+subset_states <- c("tx", "la", "ok") # Save a subset with a smaller geography
+
+dist_TBI %>%
+  filter(str_to_lower(ST) %in% subset_states) %>%
+  geo_join(US_counties, ., by="GEOID", how="inner") %>%
+  
+
+  ggplot() +
+  geom_sf(aes(fill=dist_min), color=NA) +
+  geom_sf(data=filter(provs, geoState %in% subset_states), alpha=0.2) +
+
+  coord_sf(crs = 4269) +
+  scale_fill_distiller(palette="Reds", #guide = 'legend',
+                       values = scales::rescale(c(0,10,20,30,50,100)),
+                       # trans="sqrt",
+                       name="Mi to nearest NSG", direction=1) +
+  ggthemes::theme_map() +
+  theme(legend.direction="horizontal",legend.position=c(0.5,0)) 
+```
+
+```{r subset-states-2, echo=F, message=F}
+# Save a subset with a smaller geography
+subset_states <- c("nd", "sd", "mt", "wy")
+
+dist_TBI %>%
+  filter(str_to_lower(ST) %in% subset_states) %>%
+  geo_join(US_counties, ., by="GEOID", how="inner") %>%
+  
+
+  ggplot() +
+  geom_sf(aes(fill=dist_min), color=NA) +
+  geom_sf(data=filter(provs, geoState %in% subset_states), alpha=0.2) +
+
+  coord_sf(crs = 4269) +
+  scale_fill_distiller(palette="Reds", #guide = 'legend',
+                       values = scales::rescale(c(0,10,20,30,50,100)),
+                       # trans="sqrt",
+                       name="Mi to nearest NSG", direction=1) +
+  ggthemes::theme_map() +
+  theme(legend.direction="horizontal",legend.position=c(0.5,0)) 
+```
+
+## Full map, without missing data
+
+```{r FullMap-Dist, cache=TRUE}
+# geo_join(US_counties, # spatial_data
+#          filter(dist_TBI, !is.na(Deaths)), # exclude missing TBI data
+#          by="GEOID", how="inner") %>%      # with the inner join
+geo_join(US_counties, dist_TBI, by="GEOID") %>%
+  mutate(dist_min = ifelse(is.na(Deaths), NA, dist_min)) %>%
+  ggplot() +
+  geom_sf(aes(fill=dist_min+1), color=NA) + 
+  coord_sf(crs = 4269) +
+  scale_fill_distiller(palette="Reds", #guide = 'legend',
+                       # values = scales::rescale(c(0,10,20,30,50,100)),
+                       trans="log10",
+                       name="Mi to nearest NSG", direction=1) +
+  # theme_dark()
+  ggthemes::theme_map() +
+  theme(legend.direction="horizontal") 
+```
+
+
+```{r FullMap-TBI, cache=TRUE}
+geo_join(US_counties, dist_TBI, by="GEOID") %>%
+  mutate(dist_min = ifelse(is.na(Deaths), NA, dist_min)) %>%
+  ggplot() +
+  geom_sf(aes(fill=Crude), color=NA) + 
+  coord_sf(crs = 4269) +
+  scale_fill_distiller(palette="Blues",# guide = 'legend',
+                       na.value = "grey50",
+                       # trans="sqrt",
+                       values = scales::rescale(c(0,5,10,20,30,50,100)),
+                       name="TBI deaths", direction=1) +
+  # theme_dark()
+  ggthemes::theme_map() +
+  theme(legend.direction="horizontal") 
+```
+
+## Full map, imputed
+
+```{r FullMap-imputed-Dist, cache=TRUE}
+# geo_join(US_counties, # spatial_data
+#          filter(dist_TBI, !is.na(Deaths)), # exclude missing TBI data
+#          by="GEOID", how="inner") %>%      # with the inner join
+geo_join(US_counties, dist_TBI_imputed, by="GEOID") %>%
+  ggplot() +
+  geom_sf(aes(fill=dist_min+1), color=NA) + 
+  coord_sf(crs = 4269) +
+  scale_fill_distiller(palette="Reds", guide = 'legend',
+                       # values = scales::rescale(c(0,10,20,30,50,100)),
+                       trans="log10",
+                       name="Mi to nearest NSG", direction=1) +
+  # theme_dark()
+  ggthemes::theme_map() +
+  theme(legend.direction="horizontal") 
+```
+
+
+```{r FullMap-imputed-TBI, cache=TRUE}
+geo_join(US_counties, dist_TBI_imputed, by="GEOID") %>%
+  ggplot() +
+  geom_sf(aes(fill=Crude), color=NA) + 
+  coord_sf(crs = 4269) +
+  scale_fill_distiller(palette="Blues", guide = 'legend',
+                       na.value = "grey50",
+                       # trans="sqrt",
+                       values = scales::rescale(c(0,5,10,20,30,50,100)),
+                       name="TBI deaths", direction=1) +
+  # theme_dark()
+  ggthemes::theme_map() +
+  theme(legend.direction="horizontal") 
+```
+
+
+
+

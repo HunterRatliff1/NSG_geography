@@ -1,0 +1,309 @@
+---
+title: "Geocode NPIs With Google"
+author: "Hunter Ratliff"
+date: "1/23/2020"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+    
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=F, warning=F, message=F)
+
+library(testthat)
+library(ggmap)
+library(viridis)
+library(tictoc)
+library(RColorBrewer)
+library(rgeos)
+library(spdep)
+library(sf)
+library(maps)
+library(maptools)
+library(tigris)
+library(leaflet)
+library(tidycensus)
+library(tidyverse)
+```
+
+# Geocoding prep
+
+```{r StepwiseFxn, echo=T}
+stepwise_call <- function(df_full, df_called=NULL, n=5, msg=T){
+  library(testthat)
+  ## This function takes two main arguments:
+  ##   - df_full: the full master df
+  ##   - df_called: the results that have already been geocoded
+  
+  
+  test_that("provided with a tibble", # `df_full` must be data.frame
+            expect_s3_class(df_full, "data.frame"))
+  
+  # Select only records that need to be geocalled
+  if(!is.null(df_called)) {
+    # If `df_called` is provided, only return rows that have
+    # not already been geocoded
+    test_that("provided with a tibble", # `df_called` must be data.frame
+              expect_s3_class(df_called, "data.frame"))
+      
+    df <- df_full %>% anti_join(df_called)
+  } else({ df <- df_full })
+  
+  # pass message displaying progress
+  if(msg) {
+    message(glue::glue("\n\n{nrow(df)-n} of {nrow(df_full)} records still need to be geocoded"))
+    }
+  
+  # Call the API
+  api_results <- df %>%
+    filter(row_number()<=n) %>%
+    
+    
+    mutate_geocode(SearchQuery, output="more")
+  
+  # return the new results, binded to the old
+  if(!is.null(df_called)) {
+    rbind(api_results, df_called)
+  } else(api_results)
+}
+```
+
+First we'll read in the raw data from `Data/raw_NSG.csv`. Then we'll select each unique NPI and construct a search query for the [Google Maps API](https://developers.google.com/maps/documentation/geocoding/intro). We'll do a few passes of the data, but we'll start by geocoding the string `{First Name}` + `{Last Name}` + `neurosurgeon`:
+
+```{r, message=F}
+NSG <- read_csv("Data/raw_NSG.csv") %>%
+  rename(degree=nppes_credentials) %>%
+  mutate(degree = str_replace_all(degree, "\\.","")) %>%
+  
+  # Rename vars
+  rename(first=firstName, last=lastName) %>%
+  mutate(
+    SearchQuery = str_glue("{first} {last} neurosurgeon"),
+    SearchQuery = str_to_lower(SearchQuery)
+  ) %>%
+  select(npi, SearchQuery, first, last, degree, state, city) %>%
+  unique()
+
+print(NSG)
+```
+
+# Round 1 
+
+Okay, let's do this. My first pass of the data (which took ~45 mins) was done by re-running the code below until all the NPIs had been sent to the API
+
+```{r, eval=F, message=T, echo=T}
+if(!exists("NSG_called")){ # only run once
+  NSG_called <- stepwise_call(NSG) 
+}
+
+# Keep re-running as needed
+tictoc::tic()
+NSG_called <- stepwise_call(NSG, df_called=NSG_called, n = 600)
+NSG_called %>% write_csv("Google_results/geo_npi_byName_R1.csv")
+beepr::beep()
+tictoc::toc()
+```
+
+[4521 API calls later](https://console.developers.google.com/apis/dashboard?project=api-project-257638746743&pli=1) and _voila_, we're done. Some didn't return any results from our first pass, as displayed in the table below. We'll try geocoding again, but we'll bias these results by appending the state abbreviation after the search query (e.g. `John Smith neurosurgeon` + `TX`)
+
+```{r}
+# Round 1 calls
+API_r1 <- read_csv("Google_results/geo_npi_byName_R1.csv") %>%
+  select(npi:address) %>%
+  mutate(                                     # flag records that didn't return
+    FirstPass = ifelse(is.na(address), F, T), # results from Google as FALSE
+    PassNum   = ifelse(FirstPass, 1, 2)
+  ) 
+
+API_r1 %>%
+  filter(!FirstPass) %>%
+  select(npi:city, -SearchQuery)
+```
+
+# Round 2
+
+```{r Round2, eval=F, echo=T}
+# API_r2 <- filter(API_r1, !FirstPass) %>%
+  # select(npi:city) %>%
+  # mutate(SearchQuery = str_glue("{SearchQuery} in {state}")) %>%
+  # mutate_geocode(SearchQuery, output="more") 
+# 
+# API_r2 %>% write_csv("Google_results/geo_npi_byName_R2.csv")
+```
+
+After this round, we only had 5 queries which failed to return _any_ geocode. Among these five, everyone was in Puerto Rico besides **Henry Feuer**, as shown below. 
+
+```{r}
+API_r2 <- read_csv("Google_results/geo_npi_byName_R2.csv") %>%
+  select(npi:address, -SearchQuery) %>%
+  mutate(
+    FirstPass = FALSE, # by definition these are not first passes
+    PassNum   = case_when(
+      is.na(address)                         ~ 3, # r2 geocoding failed
+      loctype == "approximate"               ~ 3, # returned cities/states
+      type == "administrative_area_level_1"  ~ 3, # returned states
+      loctype == "rooftop"                   ~ 2,  # exact address
+      type %in% c("doctor", "establishment") ~ 2,
+      TRUE                                   ~ 2)
+    )
+
+filter(API_r2, is.na(lat)) %>%
+  select(npi:city)
+```
+
+However among the records that did return results from the API, we have a mixed bag. The table below shows a summary of the results, with a sample address to illustrate what `loctype` and `type` actually mean. I've labeled these with the column `PassNum`, with a `PassNum = 2` indicating that it gave us an address and a `PassNum = 3` meaning that we'll need to do another pass (perhaps manually, but we'll deal with that another day).
+
+
+```{r}
+API_r2 %>% group_by(PassNum, loctype, type) %>% 
+  summarise(
+    example_address = dplyr::first(address),
+    # example_address = str_trunc(example_address, 40, "left"),
+    n_records = n()
+  ) %>%
+  ungroup() %>%
+  select(PassNum, n_records, loctype, type, example_address) %>%
+  arrange(PassNum, desc(n_records))
+```
+
+# Post-processing
+
+First we'll combine the results from the first pass and the successful second pass into one tibble. We'll exclude results that returned from  countries outside of the US (only four results: UK, Canada, India, Mexico) and extract the state, city, zipcode, and street addresses returned from Google. These will be stored as `geoXXX` to avoid confusion with the `city` and `state` columns from the NPI database. This will be stored as `geo_google_raw`.
+
+```{r}
+geo_google_raw <- API_r1 %>%
+  filter(FirstPass) %>% # only those that didn't get a second pass
+  dplyr::select(-SearchQuery) %>%
+  
+  # Join to round 2 calls
+  bind_rows(API_r2) %>%
+  filter(PassNum <= 2) %>%
+  
+  # Filter by only USA
+  mutate(
+    geoCountry = str_extract(address, "(?<=, )\\w+$"),
+    address    = str_replace(address, ", \\w+$", "")
+  ) %>%
+  filter(geoCountry=="usa") %>%
+    
+  mutate(
+    # Grabs state & zip
+    geoState  = str_extract(address, "(?<=, )\\w\\w \\d+$"),
+    address   = str_replace(address, ", \\w\\w \\d+$", ""), 
+    # Now grab city
+    geoCity   = str_extract(address, "(?<=, )(\\w| )+$"),
+    # Extract zip from state 
+    geoZip    = str_extract(geoState, "\\d+$"),
+    geoState  = str_extract(geoState, "^\\w\\w"),
+    
+    # call the remainder street
+    geoStreet = str_replace(address, ", (\\w| )+$", "")
+  ) %>%
+  dplyr::select(-address)
+  
+# geo_google_raw %>% write_csv("Google_results/geo_google_raw.csv")
+```
+
+# Merging to County data
+
+```{r}
+geo_google_raw <- read_csv("Google_results/geo_google_raw.csv")
+
+# make sf file
+provs <- geo_google_raw %>%
+  filter(geoState!="hi", geoState!="ak") %>%
+  st_as_sf(coords = c("lon", "lat"), crs=4269)
+
+# get counties
+US_counties <- tigris::counties(state = c(state.abb, "DC"), cb=T) %>%
+  filter(STATEFP!="02", STATEFP!="15")
+
+# Similar to the `find_closest` fxn
+i <- st_nearest_feature(provs, US_counties)
+c <- US_counties[i,]
+
+# Add county FIPS to file, write csv
+provs %>%
+  mutate(geoCounty = st_drop_geometry(c)$GEOID) %>%
+  st_drop_geometry() %>%
+  select(npi, geoCounty) %>%
+  left_join(geo_google_raw, .) %>% 
+  write_csv("Google_results/geo_google_raw.csv")
+rm(i, c, provs, US_counties)
+```
+
+
+
+
+# Work in Progress
+
+```{r, eval=F}
+library(sp)
+library(maps)
+library(maptools)
+# Prepare SpatialPolygons object with one SpatialPolygon
+# per county
+counties <- map('county', fill=TRUE, col="transparent", plot=FALSE)
+IDs <- sapply(strsplit(counties$names, ":"), function(x) x[1])
+counties_sp <- map2SpatialPolygons(counties, IDs=IDs,
+                                   proj4string=CRS("+proj=longlat +datum=WGS84"))
+  
+# Convert pointsDF to a SpatialPoints object 
+pointsSP <- SpatialPoints(select(filter(NSG_called, !is.na(lon)), lon, lat), 
+                          proj4string=CRS("+proj=longlat +datum=WGS84"))
+
+plot(pointsSP)
+
+pointsSP <- NSG_called %>%
+  filter(lon < -50, lon > -140, lat>20) %>%
+  filter(!is.na(lon)) %>%
+  select(lon, lat) %>%
+  SpatialPoints(proj4string=CRS("+proj=longlat +datum=WGS84"))
+
+
+pointsSP %>%
+  fortify() %>%
+  ggplot(aes(lon, lat)) + geom_point()
+  
+
+
+fortify(counties_sp, region="id") %>%
+  ggplot()  + geom_polygon(aes(x=long, y=lat, group=id))
+```
+
+
+
+
+
+```{r, eval=F}
+latlong2county <- function(long, lat) {
+  library(sp)
+  library(maps)
+  library(maptools)
+  # Prepare SpatialPolygons object with one SpatialPolygon
+  # per county
+  counties <- map('county', fill=TRUE, col="transparent", plot=FALSE)
+  IDs <- sapply(strsplit(counties$names, ":"), function(x) x[1])
+  counties_sp <- map2SpatialPolygons(counties, IDs=IDs,
+                                     proj4string=CRS("+proj=longlat +datum=WGS84"))
+  
+  # Convert pointsDF to a SpatialPoints object 
+  pointsSP <- SpatialPoints(data.frame(long=long, lat=lat), 
+                            proj4string=CRS("+proj=longlat +datum=WGS84"))
+  
+  # Use 'over' to get _indices_ of the Polygons object containing each point 
+  indices <- over(pointsSP, counties_sp)
+  
+  # Return the county names of the Polygons object containing each point
+  countyNames <- sapply(counties_sp@polygons, function(x) x@ID)
+  countyNames[indices]
+}
+```
+
