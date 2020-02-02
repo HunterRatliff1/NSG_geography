@@ -6,7 +6,8 @@
 .DS_Store
 *.Rproj
 
-# folders
+# folders (ignore data for now)
+Data 
 Google_results
 workflow_files
 workflow_cache
