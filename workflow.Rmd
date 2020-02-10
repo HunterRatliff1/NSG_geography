@@ -634,12 +634,167 @@ dist <- read_csv("Data/Distances_by-names.csv")
 glimpse(dist)
 ```
 
-Now we want to join these distances to our other data. We'll start by getting the 2017 5-year ACS population estimates for the counties using the [tidycensus](https://walkerke.github.io/tidycensus/) package, and then we'll merge that with the TBI data. This will be saved as `mergedToTBI.csv`.
+# Joining it all together
+
+Now we want to join these distances to our other data. 
+
+## Get census estimates
+
+We'll start by getting the 2012 5-year ACS population estimates for the counties using the [tidycensus](https://walkerke.github.io/tidycensus/) package, along with a few other variables:
+
+- pop12: 2012 ACS 5-year population estimate
+- male: Proportion of population that is male
+- Over65: Proportion of population that is 65 years old or greater
+- Over75: Proportion of population that is 75 years old or greater
+
+
+
+```{r getACS, eval=FALSE}
+###############################
+###         NOT RUN         ###
+###############################
+
+## Load the variable names in as df
+vars_acs12 <- tidycensus::load_variables(2012, "acs5")
+
+## ------------------------------------------ ##
+## Find proportion of population that is male ##
+## ------------------------------------------ ##
+prop_male <- get_acs("county", variables = c("B01001_002", "B01001_026"),
+                   summary_var = "B01001_001",
+                   year = 2012) %>%
+  # Replace missing moe's with 0
+  replace_na(list(moe=0, summary_moe=0)) %>%
+  
+  # ## Join to names of variables
+  # left_join(vars_acs12, by=c("variable"="name")) %>% select(-concept) %>%
+  
+  ## Make variables readable
+  mutate(variable = str_replace(variable, "B01001_", "")) %>%
+  mutate(variable = case_when(variable=="002" ~ "Males",
+                              variable=="026" ~ "Females")) %>%
+  ## Find proportion males 
+  filter(variable=="Males") %>%
+  mutate(male     = estimate/summary_est,
+         male_moe = moe_prop(estimate, summary_est, moe, summary_moe))
+
+
+
+## ----------------------------------------- ##
+## Find proportion of population that is 65+ ##
+## ----------------------------------------- ##
+prop_over65 <- get_acs("county", table = "B01001",
+                      summary_var = "B01001_001", # summary is total population
+                      year = 2012) %>%
+  # Replace missing moe's with 0
+  replace_na(list(moe=0, summary_moe=0)) %>%
+  
+  ## Join to names of variables
+  left_join(vars_acs12, by=c("variable"="name")) %>% select(-concept) %>%
+  
+  ## Make variables readable, split age & sex
+  mutate(variable = str_replace(variable, "B01001_0", "")) %>%
+  filter(variable %in% c(20:25, 44:49)) %>% # select only vars of interest
+  mutate(label = str_remove(label, "Estimate!!Total!!")) %>%
+  tidyr::separate(label, into= c("Sex", "Age"), sep="!!") %>%
+  
+  ## aggregate sex & age by county
+  group_by(GEOID, NAME, summary_est, summary_moe) %>%
+  summarise(estimate = sum(estimate),
+            moe      = moe_sum(moe, estimate)) %>%
+  
+  mutate(Over65     = estimate/summary_est,
+         Over65_moe = moe_prop(estimate, summary_est, moe, summary_moe))
+
+
+## ----------------------------------------- ##
+## Find proportion of population that is 75+ ##
+## ----------------------------------------- ##
+prop_over75 <- get_acs("county", table = "B01001",
+                      summary_var = "B01001_001", # summary is total population
+                      year = 2012) %>%
+  # Replace missing moe's with 0
+  replace_na(list(moe=0, summary_moe=0)) %>%
+  
+  ## Join to names of variables
+  left_join(vars_acs12, by=c("variable"="name")) %>% select(-concept) %>%
+  
+  ## Make variables readable, split age & sex
+  mutate(variable = str_replace(variable, "B01001_0", "")) %>%
+  filter(variable %in% c(23:25, 47:49)) %>% # select only vars of interest
+  mutate(label = str_remove(label, "Estimate!!Total!!")) %>%
+  tidyr::separate(label, into= c("Sex", "Age"), sep="!!") %>%
+  
+  ## aggregate sex & age by county
+  group_by(GEOID, NAME, summary_est, summary_moe) %>%
+  summarise(estimate = sum(estimate),
+            moe      = moe_sum(moe, estimate)) %>%
+  
+  mutate(Over75     = estimate/summary_est,
+         Over75_moe = moe_prop(estimate, summary_est, moe, summary_moe))
+
+
+
+## -------------- ##
+## Merge into one ##
+## -------------- ##
+population <- select(prop_male, GEOID, NAME, summary_est:male_moe) %>%
+  left_join(select(prop_over65, GEOID:summary_moe, Over65, Over65_moe)) %>%
+  left_join(select(prop_over75, GEOID:summary_moe, Over75, Over75_moe)) %>%
+  rename(pop12=summary_est, pop12_moe=summary_moe) %>%
+  select(-NAME) %>%
+  select(-pop12_moe, -male_moe, -Over65_moe, -Over75_moe) # drop margins of error
+```
+
+
+
+Now we'll merge that with the TBI data. This will be saved as `mergedToTBI_v2.csv`.
+
+```{r mergeToTBI_v2, eval=FALSE}
+###############################
+###         NOT RUN         ###
+###############################
+
+##
+## Update: 2020-02-10 (v2)
+##         Use 2012 acs estimates. Also add in more variables from the census
+##         This might break old versions of code that used the variable pop17,
+##         Now use the varaible pop12
+
+
+mergedToTBI <- dist %>%
+  # Join to 2017 acs estimates
+  left_join(population) %>%
+   # Join to TBI data
+  left_join(TBIs, by=c("GEOID"="CountyFIPS")) %>%
+  # Rename colums
+  select(GEOID, NAME, ST, dist_cent, dist_min, npi:providerST,  
+         pop12, male, Over65, Over75,
+         Deaths, AgeAdj=AgeAdj_Rate, Crude=Crude_Rate, StdPop=Population) %>%
+  mutate(DataSource="Geocoded NPI names")
+
+
+## Also add the total number of providers for each county
+nProvs <- provs %>%
+  st_drop_geometry() %>%
+  count(geoCounty) %>%
+  rename(nProvs=n, GEOID=geoCounty)
+
+mergedToTBI %>%
+  left_join(nProvs) %>%
+  write_csv("Data/mergedToTBI_v2.csv") # Write to csv
+  
+
+
+rm(population, dist, mergedToTBI, nProvs)
+```
+
 
 
 ```{r mergeToTBI, eval=FALSE}
 ###############################
 ###         NOT RUN         ###
+###      OLD VERSION        ###
 ###############################
 population <- tidycensus::get_acs(geography = "county", variables = "B01001_001",
                                   year=2017, survey = "acs5") %>%
@@ -672,7 +827,7 @@ rm(population, dist, mergedToTBI, nProvs)
 ```
 
 ```{r readMerged, echo=F}
-dist_TBI <- read_csv("Data/mergedToTBI.csv")
+dist_TBI <- read_csv("Data/mergedToTBI_v2.csv")
 glimpse(dist_TBI)
 ```
 
@@ -682,7 +837,7 @@ glimpse(dist_TBI)
 
 Our final dataset is supposed to include all counties in the continental US, and we seem to be missing two:
 
-```{r}
+```{r missingCounties, echo=F}
 fips_codes %>%
   mutate(GEOID = str_c(state_code, county_code)) %>%
   anti_join(dist_TBI, by="GEOID") %>%
@@ -701,7 +856,7 @@ Among the `r nrow(dist_TBI)` counties in our dataset, `r nrow(filter(dist_TBI, i
 # naniar::gg_miss_upset(dist_TBI)
 p1 <- dist_TBI %>%
   mutate(Missing = is.na(Deaths)) %>%
-  ggplot(aes(x=pop17, fill=Missing)) +
+  ggplot(aes(x=pop12, fill=Missing)) +
   geom_density(alpha=.5) +
   scale_x_log10() +
   labs(x="County population (log)") +
@@ -883,7 +1038,7 @@ dist_TBI_imputed %>%
 The Base model predicts crude rate based on the centroid distance and the log of the county population. While the crude rate does already incorporate the county's population into the calculation of the rate itself, we're still including county population here
 
 ```{r lm}
-fit <- lm(Crude ~ dist_cent+log(pop17), data=dist_TBI) 
+fit <- lm(Crude ~ dist_cent+log(pop12), data=dist_TBI) 
 summary(fit)
 # broom::augment_columns(fit, dist_TBI) %>%
 #   # ggplot(aes(x=.std.resid)) + geom_histogram()
@@ -901,7 +1056,7 @@ This used the same formula as the first model, but also includes the imputed dat
 
 ```{r lm_impute}
 fit_impute <- dist_TBI_imputed %>%
-  lm(Crude ~ dist_cent + log(pop17), data=.)
+  lm(Crude ~ dist_cent + log(pop12), data=.)
 summary(fit_impute)
 ```
 
@@ -913,14 +1068,14 @@ Same as above, but this only includes imputed data where the crude rate is below
 fit_worst <- dist_TBI_imputed %>%
   # only orignial data | Imputed where crude is less than the mean
   filter(!imputed | Crude<mean(dist_TBI$Crude,na.rm = T)) %>%
-  lm(Crude ~ dist_cent + log(pop17), data=.)
+  lm(Crude ~ dist_cent + log(pop12), data=.)
 summary(fit_worst)
 ```
 
 Coefs for each model
 
 ```{r}
-sjPlot::plot_models(fit, fit_impute, fit_worst, std.est = "std2", rm.terms="log(pop17)",
+sjPlot::plot_models(fit, fit_impute, fit_worst, std.est = "std2", rm.terms="log(pop12)",
                     m.labels = c("Base model", "Imputed", "Worst case"),
                     legend.title = "Model")
 # plot_model(fit, type = "pred", terms = "dist_cent")
@@ -937,7 +1092,7 @@ Not that I know much about Bayesian linear modeling, but here's a model of the C
 ```{r Bayes}
 library(BAS)
 set.seed(1234)
-modBayes <- bas.lm(Crude ~ dist_cent+pop17,
+modBayes <- bas.lm(Crude ~ dist_cent+pop12,
                      data = dist_TBI,
                      method = "MCMC",
                      prior = "ZS-null",
