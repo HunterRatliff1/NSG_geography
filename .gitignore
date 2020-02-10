@@ -11,6 +11,7 @@ Data
 Google_results
 workflow_files
 workflow_cache
+rsconnect
 
 # HTML, png, pdf
 *.html
