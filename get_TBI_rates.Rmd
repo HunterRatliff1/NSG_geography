@@ -1,0 +1,539 @@
+---
+title: "Calling TBI data"
+author: "Hunter Ratliff"
+date: "2/6/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=F, warning=F)
+library(tidyverse)
+library(glue)
+```
+
+## Original county
+
+```{r cars}
+TBIs_org <- read_csv("Data/TBI_Deaths.csv") %>%
+  # Correct Shannon, SD to it's new name
+  mutate(
+    CountyFIPS = ifelse(CountyFIPS=="46113", "46102", CountyFIPS),
+    County     = ifelse(CountyFIPS=="46102", "OGLALA LAKOTA", County))
+```
+
+# OVERALL
+
+Traumatic Brain Injury, All Intents, All Races, All Ethnicities, Both Sexes, All Ages
+
+```{r overall-county}
+url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m8976144_csv"
+table.name <- read_csv(url)[[4,1]]
+table.id   <- read_csv(url)[[11,1]]
+pop.subset <- "Overall"
+
+
+df <- read_csv(url, skip = 21) %>%
+  # Make FIPS
+  mutate(StateFIPS  = str_pad(StateFIPS, pad = "0", width = 2),
+         CountyFIPS = str_pad(CountyFIPS, pad = "0", width = 3),
+         GEOID      = str_c(StateFIPS, CountyFIPS)) %>%
+  
+  # Correct county data
+  mutate(CountyFIPS = ifelse(CountyFIPS=="46113", "46102", CountyFIPS),
+         County     = ifelse(CountyFIPS=="46102", "OGLALA LAKOTA", County)) %>%
+  
+  # Re-arrange order
+  select(GEOID, ST, County, StdPop=Population, Deaths, Crude=U_C_Rate, AgeAdj=U_A_Rate) %>%
+  
+  # Add tag columns
+  mutate(pop.subset = pop.subset,
+         geo.level  = "county",
+         table.id   = table.id,
+         table.name = table.name)
+
+View(df)
+df %>% write_csv(glue("TBI_data/County/TBI_{pop.subset}_county.csv"))
+rm(url, table.name, table.id, pop.subset)
+```
+
+```{r overall-state}
+url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m2106188_csv"
+table.name <- read_csv(url)[[4,1]]
+table.id   <- read_csv(url)[[11,1]]
+pop.subset <- "Overall"
+
+df <- read_csv(url, skip = 21) %>%
+  
+  # Re-arrange order
+  select(ST, StdPop_ST=Population, Deaths_ST=Deaths, Crude_ST=U_C_Rate, AgeAdj_ST=U_A_Rate) %>%
+  
+  # Add tag columns
+  mutate(pop.subset = pop.subset,
+         geo.level  = "state",
+         table.id   = table.id,
+         table.name = table.name)
+
+View(df)
+df %>% write_csv(glue("TBI_data/State/TBI_{pop.subset}_state.csv"))
+rm(url, table.name, table.id, pop.subset)
+```
+
+# By sex
+
+## Males only
+
+Traumatic Brain Injury, All Intents, All Races, All Ethnicities, **Males**, All Ages
+
+```{r males-county}
+url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m7245223_csv"
+table.name <- read_csv(url)[[4,1]]
+table.id   <- read_csv(url)[[11,1]]
+pop.subset <- "males"
+
+
+df <- read_csv(url, skip = 21) %>%
+  # Make FIPS
+  mutate(StateFIPS  = str_pad(StateFIPS, pad = "0", width = 2),
+         CountyFIPS = str_pad(CountyFIPS, pad = "0", width = 3),
+         GEOID      = str_c(StateFIPS, CountyFIPS)) %>%
+  
+  # Correct county data
+  mutate(CountyFIPS = ifelse(CountyFIPS=="46113", "46102", CountyFIPS),
+         County     = ifelse(CountyFIPS=="46102", "OGLALA LAKOTA", County)) %>%
+  
+  # Re-arrange order
+  select(GEOID, ST, County, StdPop=Population, Deaths, Crude=U_C_Rate, AgeAdj=U_A_Rate) %>%
+  
+  # Add tag columns
+  mutate(pop.subset = pop.subset,
+         geo.level  = "county",
+         table.id   = table.id,
+         table.name = table.name)
+
+View(df)
+df %>% write_csv(glue("TBI_data/County/TBI_{pop.subset}_county.csv"))
+rm(url, table.name, table.id, pop.subset)
+```
+
+```{r males-state}
+url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m4328936_csv"
+table.name <- read_csv(url)[[4,1]]
+table.id   <- read_csv(url)[[11,1]]
+pop.subset <- "males"
+
+df <- read_csv(url, skip = 21) %>%
+  
+  # Re-arrange order
+  select(ST, StdPop_ST=Population, Deaths_ST=Deaths, Crude_ST=U_C_Rate, AgeAdj_ST=U_A_Rate) %>%
+  
+  # Add tag columns
+  mutate(pop.subset = pop.subset,
+         geo.level  = "state",
+         table.id   = table.id,
+         table.name = table.name)
+
+View(df)
+df %>% write_csv(glue("TBI_data/State/TBI_{pop.subset}_state.csv"))
+rm(url, table.name, table.id, pop.subset)
+```
+
+## Females only
+
+Traumatic Brain Injury, All Intents, All Races, All Ethnicities, **Females**, All Ages
+
+```{r females-county}
+url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m4010307_csv"
+table.name <- read_csv(url)[[4,1]]
+table.id   <- read_csv(url)[[11,1]]
+pop.subset <- "females"
+
+
+df <- read_csv(url, skip = 21) %>%
+  # Make FIPS
+  mutate(StateFIPS  = str_pad(StateFIPS, pad = "0", width = 2),
+         CountyFIPS = str_pad(CountyFIPS, pad = "0", width = 3),
+         GEOID      = str_c(StateFIPS, CountyFIPS)) %>%
+  
+  # Correct county data
+  mutate(CountyFIPS = ifelse(CountyFIPS=="46113", "46102", CountyFIPS),
+         County     = ifelse(CountyFIPS=="46102", "OGLALA LAKOTA", County)) %>%
+  
+  # Re-arrange order
+  select(GEOID, ST, County, StdPop=Population, Deaths, Crude=U_C_Rate, AgeAdj=U_A_Rate) %>%
+  
+  # Add tag columns
+  mutate(pop.subset = pop.subset,
+         geo.level  = "county",
+         table.id   = table.id,
+         table.name = table.name)
+
+View(df)
+df %>% write_csv(glue("TBI_data/County/TBI_{pop.subset}_county.csv"))
+rm(url, table.name, table.id, pop.subset)
+```
+
+```{r females-state}
+url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m2518907_csv"
+table.name <- read_csv(url)[[4,1]]
+table.id   <- read_csv(url)[[11,1]]
+pop.subset <- "females"
+
+df <- read_csv(url, skip = 21) %>%
+  
+  # Re-arrange order
+  select(ST, StdPop_ST=Population, Deaths_ST=Deaths, Crude_ST=U_C_Rate, AgeAdj_ST=U_A_Rate) %>%
+  
+  # Add tag columns
+  mutate(pop.subset = pop.subset,
+         geo.level  = "state",
+         table.id   = table.id,
+         table.name = table.name)
+
+View(df)
+df %>% write_csv(glue("TBI_data/State/TBI_{pop.subset}_state.csv"))
+rm(url, table.name, table.id, pop.subset)
+```
+
+# Ages
+
+## 65+ years old
+
+
+```{r age65-county}
+url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m7284009_csv"
+table.name <- read_csv(url)[[4,1]]
+table.id   <- read_csv(url)[[11,1]]
+pop.subset <- "65+ year old"
+
+
+df <- read_csv(url, skip = 21) %>%
+  # Make FIPS
+  mutate(StateFIPS  = str_pad(StateFIPS, pad = "0", width = 2),
+         CountyFIPS = str_pad(CountyFIPS, pad = "0", width = 3),
+         GEOID      = str_c(StateFIPS, CountyFIPS)) %>%
+  
+  # Correct county data
+  mutate(CountyFIPS = ifelse(CountyFIPS=="46113", "46102", CountyFIPS),
+         County     = ifelse(CountyFIPS=="46102", "OGLALA LAKOTA", County)) %>%
+  
+  # Re-arrange order
+  select(GEOID, ST, County, StdPop=Population, Deaths, Crude=U_C_Rate, AgeAdj=U_A_Rate) %>%
+  
+  # Add tag columns
+  mutate(pop.subset = pop.subset,
+         geo.level  = "county",
+         table.id   = table.id,
+         table.name = table.name)
+
+View(df)
+df %>% write_csv(glue("TBI_data/County/TBI_{pop.subset}_county.csv"))
+rm(url, table.name, table.id, pop.subset)
+glue("{100*round(nrow(filter(df, is.na(Deaths)))/nrow(df),3)}% missing")
+```
+
+```{r age65-state}
+url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m3750744_csv"
+table.name <- read_csv(url)[[4,1]]
+table.id   <- read_csv(url)[[11,1]]
+pop.subset <- "65+ year old"
+
+df <- read_csv(url, skip = 21) %>%
+  
+  # Re-arrange order
+  select(ST, StdPop_ST=Population, Deaths_ST=Deaths, Crude_ST=U_C_Rate, AgeAdj_ST=U_A_Rate) %>%
+  
+  # Add tag columns
+  mutate(pop.subset = pop.subset,
+         geo.level  = "state",
+         table.id   = table.id,
+         table.name = table.name)
+
+View(df)
+df %>% write_csv(glue("TBI_data/State/TBI_{pop.subset}_state.csv"))
+rm(url, table.name, table.id, pop.subset)
+```
+
+
+# Intent
+
+## Unintentional
+
+```{r unintentional-county}
+url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m3378873_csv"
+table.name <- read_csv(url)[[4,1]]
+table.id   <- read_csv(url)[[11,1]]
+pop.subset <- "unintentional"
+
+
+df <- read_csv(url, skip = 21) %>%
+  # Make FIPS
+  mutate(StateFIPS  = str_pad(StateFIPS, pad = "0", width = 2),
+         CountyFIPS = str_pad(CountyFIPS, pad = "0", width = 3),
+         GEOID      = str_c(StateFIPS, CountyFIPS)) %>%
+  
+  # Correct county data
+  mutate(CountyFIPS = ifelse(CountyFIPS=="46113", "46102", CountyFIPS),
+         County     = ifelse(CountyFIPS=="46102", "OGLALA LAKOTA", County)) %>%
+  
+  # Re-arrange order
+  select(GEOID, ST, County, StdPop=Population, Deaths, Crude=U_C_Rate, AgeAdj=U_A_Rate) %>%
+  
+  # Add tag columns
+  mutate(pop.subset = pop.subset,
+         geo.level  = "county",
+         table.id   = table.id,
+         table.name = table.name)
+
+View(df)
+df %>% write_csv(glue("TBI_data/County/TBI_{pop.subset}_county.csv"))
+rm(url, table.name, table.id, pop.subset)
+glue("{100*round(nrow(filter(df, is.na(Deaths)))/nrow(df),3)}% missing")
+```
+
+```{r unintentional-state}
+url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m4021328_csv"
+table.name <- read_csv(url)[[4,1]]
+table.id   <- read_csv(url)[[11,1]]
+pop.subset <- "unintentional"
+
+df <- read_csv(url, skip = 21) %>%
+  
+  # Re-arrange order
+  select(ST, StdPop_ST=Population, Deaths_ST=Deaths, Crude_ST=U_C_Rate, AgeAdj_ST=U_A_Rate) %>%
+  
+  # Add tag columns
+  mutate(pop.subset = pop.subset,
+         geo.level  = "state",
+         table.id   = table.id,
+         table.name = table.name)
+
+View(df)
+df %>% write_csv(glue("TBI_data/State/TBI_{pop.subset}_state.csv"))
+rm(url, table.name, table.id, pop.subset)
+```
+
+## Suicide
+
+```{r suicide-county}
+url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m509846_csv"
+table.name <- read_csv(url)[[4,1]]
+table.id   <- read_csv(url)[[11,1]]
+pop.subset <- "suicide"
+
+
+df <- read_csv(url, skip = 21) %>%
+  # Make FIPS
+  mutate(StateFIPS  = str_pad(StateFIPS, pad = "0", width = 2),
+         CountyFIPS = str_pad(CountyFIPS, pad = "0", width = 3),
+         GEOID      = str_c(StateFIPS, CountyFIPS)) %>%
+  
+  # Correct county data
+  mutate(CountyFIPS = ifelse(CountyFIPS=="46113", "46102", CountyFIPS),
+         County     = ifelse(CountyFIPS=="46102", "OGLALA LAKOTA", County)) %>%
+  
+  # Re-arrange order
+  select(GEOID, ST, County, StdPop=Population, Deaths, Crude=U_C_Rate, AgeAdj=U_A_Rate) %>%
+  
+  # Add tag columns
+  mutate(pop.subset = pop.subset,
+         geo.level  = "county",
+         table.id   = table.id,
+         table.name = table.name)
+
+View(df)
+df %>% write_csv(glue("TBI_data/County/TBI_{pop.subset}_county.csv"))
+rm(url, table.name, table.id, pop.subset)
+glue("{100*round(nrow(filter(df, is.na(Deaths)))/nrow(df),3)}% missing")
+```
+
+```{r suicide-state}
+url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m8496524_csv"
+table.name <- read_csv(url)[[4,1]]
+table.id   <- read_csv(url)[[11,1]]
+pop.subset <- "suicide"
+
+df <- read_csv(url, skip = 21) %>%
+  
+  # Re-arrange order
+  select(ST, StdPop_ST=Population, Deaths_ST=Deaths, Crude_ST=U_C_Rate, AgeAdj_ST=U_A_Rate) %>%
+  
+  # Add tag columns
+  mutate(pop.subset = pop.subset,
+         geo.level  = "state",
+         table.id   = table.id,
+         table.name = table.name)
+
+View(df)
+df %>% write_csv(glue("TBI_data/State/TBI_{pop.subset}_state.csv"))
+rm(url, table.name, table.id, pop.subset)
+```
+
+# Mechanism
+
+## Transportation
+
+```{r transportation-county}
+url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m3529311_csv"
+table.name <- read_csv(url)[[4,1]]
+table.id   <- read_csv(url)[[11,1]]
+pop.subset <- "transportation"
+
+
+df <- read_csv(url, skip = 21) %>%
+  # Make FIPS
+  mutate(StateFIPS  = str_pad(StateFIPS, pad = "0", width = 2),
+         CountyFIPS = str_pad(CountyFIPS, pad = "0", width = 3),
+         GEOID      = str_c(StateFIPS, CountyFIPS)) %>%
+  
+  # Correct county data
+  mutate(CountyFIPS = ifelse(CountyFIPS=="46113", "46102", CountyFIPS),
+         County     = ifelse(CountyFIPS=="46102", "OGLALA LAKOTA", County)) %>%
+  
+  # Re-arrange order
+  select(GEOID, ST, County, StdPop=Population, Deaths, Crude=U_C_Rate, AgeAdj=U_A_Rate) %>%
+  
+  # Add tag columns
+  mutate(pop.subset = pop.subset,
+         geo.level  = "county",
+         table.id   = table.id,
+         table.name = table.name)
+
+View(df)
+df %>% write_csv(glue("TBI_data/County/TBI_{pop.subset}_county.csv"))
+rm(url, table.name, table.id, pop.subset)
+glue("{100*round(nrow(filter(df, is.na(Deaths)))/nrow(df),3)}% missing")
+```
+
+```{r transportation-state}
+url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m8177371_csv"
+table.name <- read_csv(url)[[4,1]]
+table.id   <- read_csv(url)[[11,1]]
+pop.subset <- "transportation"
+
+df <- read_csv(url, skip = 21) %>%
+  
+  # Re-arrange order
+  select(ST, StdPop_ST=Population, Deaths_ST=Deaths, Crude_ST=U_C_Rate, AgeAdj_ST=U_A_Rate) %>%
+  
+  # Add tag columns
+  mutate(pop.subset = pop.subset,
+         geo.level  = "state",
+         table.id   = table.id,
+         table.name = table.name)
+
+View(df)
+df %>% write_csv(glue("TBI_data/State/TBI_{pop.subset}_state.csv"))
+rm(url, table.name, table.id, pop.subset)
+```
+
+## Fall
+
+```{r fall-county}
+url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m4794739_csv"
+table.name <- read_csv(url)[[4,1]]
+table.id   <- read_csv(url)[[11,1]]
+pop.subset <- "fall"
+
+
+df <- read_csv(url, skip = 21) %>%
+  # Make FIPS
+  mutate(StateFIPS  = str_pad(StateFIPS, pad = "0", width = 2),
+         CountyFIPS = str_pad(CountyFIPS, pad = "0", width = 3),
+         GEOID      = str_c(StateFIPS, CountyFIPS)) %>%
+  
+  # Correct county data
+  mutate(CountyFIPS = ifelse(CountyFIPS=="46113", "46102", CountyFIPS),
+         County     = ifelse(CountyFIPS=="46102", "OGLALA LAKOTA", County)) %>%
+  
+  # Re-arrange order
+  select(GEOID, ST, County, StdPop=Population, Deaths, Crude=U_C_Rate, AgeAdj=U_A_Rate) %>%
+  
+  # Add tag columns
+  mutate(pop.subset = pop.subset,
+         geo.level  = "county",
+         table.id   = table.id,
+         table.name = table.name)
+
+View(df)
+df %>% write_csv(glue("TBI_data/County/TBI_{pop.subset}_county.csv"))
+rm(url, table.name, table.id, pop.subset)
+glue("{100*round(nrow(filter(df, is.na(Deaths)))/nrow(df),3)}% missing")
+```
+
+```{r fall-state}
+url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m7228039_csv"
+table.name <- read_csv(url)[[4,1]]
+table.id   <- read_csv(url)[[11,1]]
+pop.subset <- "fall"
+
+df <- read_csv(url, skip = 21) %>%
+  
+  # Re-arrange order
+  select(ST, StdPop_ST=Population, Deaths_ST=Deaths, Crude_ST=U_C_Rate, AgeAdj_ST=U_A_Rate) %>%
+  
+  # Add tag columns
+  mutate(pop.subset = pop.subset,
+         geo.level  = "state",
+         table.id   = table.id,
+         table.name = table.name)
+
+View(df)
+df %>% write_csv(glue("TBI_data/State/TBI_{pop.subset}_state.csv"))
+rm(url, table.name, table.id, pop.subset)
+```
+
+## Firearm
+
+```{r firearm-county}
+url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m6453951_csv"
+table.name <- read_csv(url)[[4,1]]
+table.id   <- read_csv(url)[[11,1]]
+pop.subset <- "firearm"
+
+
+df <- read_csv(url, skip = 21) %>%
+  # Make FIPS
+  mutate(StateFIPS  = str_pad(StateFIPS, pad = "0", width = 2),
+         CountyFIPS = str_pad(CountyFIPS, pad = "0", width = 3),
+         GEOID      = str_c(StateFIPS, CountyFIPS)) %>%
+  
+  # Correct county data
+  mutate(CountyFIPS = ifelse(CountyFIPS=="46113", "46102", CountyFIPS),
+         County     = ifelse(CountyFIPS=="46102", "OGLALA LAKOTA", County)) %>%
+  
+  # Re-arrange order
+  select(GEOID, ST, County, StdPop=Population, Deaths, Crude=U_C_Rate, AgeAdj=U_A_Rate) %>%
+  
+  # Add tag columns
+  mutate(pop.subset = pop.subset,
+         geo.level  = "county",
+         table.id   = table.id,
+         table.name = table.name)
+
+View(df)
+df %>% write_csv(glue("TBI_data/County/TBI_{pop.subset}_county.csv"))
+rm(url, table.name, table.id, pop.subset)
+glue("{100*round(nrow(filter(df, is.na(Deaths)))/nrow(df),3)}% missing")
+```
+
+```{r firearm-state}
+url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m6384422_csv"
+table.name <- read_csv(url)[[4,1]]
+table.id   <- read_csv(url)[[11,1]]
+pop.subset <- "firearm"
+
+df <- read_csv(url, skip = 21) %>%
+  
+  # Re-arrange order
+  select(ST, StdPop_ST=Population, Deaths_ST=Deaths, Crude_ST=U_C_Rate, AgeAdj_ST=U_A_Rate) %>%
+  
+  # Add tag columns
+  mutate(pop.subset = pop.subset,
+         geo.level  = "state",
+         table.id   = table.id,
+         table.name = table.name)
+
+View(df)
+df %>% write_csv(glue("TBI_data/State/TBI_{pop.subset}_state.csv"))
+rm(url, table.name, table.id, pop.subset)
+```
