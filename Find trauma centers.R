@@ -87,13 +87,5 @@ getResults <- function(gc){
         tibble(level = x$types[[1]], result = x$"short_name")
       })
   )
-  
-  
 }
 
-
-
-
-
-
-map(gc, )
