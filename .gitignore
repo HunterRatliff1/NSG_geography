@@ -7,7 +7,7 @@
 *.Rproj
 
 # folders (ignore data for now)
-Data 
+Data
 Google_results
 workflow_files
 workflow_cache
