@@ -21,6 +21,29 @@ library(broom)
 library(pander)  # for pretty outputs
 ```
 
+Source RMD located at: https://github.com/HunterRatliff1/NSG_geography/blob/master/Regressions.Rmd
+
+```{r ST_regions}
+ST_regions <- maps::state.fips %>%
+  mutate(region = case_when(region==1 ~"NORTHEAST",
+                            region==2 ~"MIDWEST",
+                            region==3 ~"SOUTH",
+                            region==4 ~"WEST"),
+         division = case_when(division==1 ~"New England",
+                              division==2 ~"Middle Atlantic",
+                              division==3 ~"East North Central",
+                              division==4 ~"West North Central",
+                              division==5 ~"South Atlantic",
+                              division==6 ~"East South Central",
+                              division==7 ~"West South Central",
+                              division==8 ~"Mountain",
+                              division==9 ~"Pacific")) %>%
+  rename(ST=abb) %>%
+  group_by(ST) %>%
+  sample_n(1) %>%
+  select(ST, region, division)
+```
+
 # Set up
 
 ## Read in the data
@@ -32,13 +55,17 @@ df_full <- read_csv("Data/mergedToTBI_v2.csv") %>%
   select(-npi, -providerCity, -providerST) %>%
   select(GEOID:Crude) %>%
   filter(!is.na(Deaths)) %>% # drop counties with missing rates
-  filter(GEOID != "46102") # GEOID didn't match to ACS data
+  filter(GEOID != "46102") %>% # GEOID didn't match to ACS data
+  left_join(ST_regions)
 
 # # Missing data
 # is.na(df_full) %>% colSums()
 
 glimpse(df_full)
 ```
+
+
+
 
 ## Plotly function
 
@@ -116,28 +143,28 @@ dx_plots <- function(lm_fit, raw_data, plots=1, alpha=.25, use_plotly=T) {
 }
 ```
 
-# Model 1
+# Model 1: SLR
 
-Simple linear regression
+Simple linear regression, same as the first one I sent you
 
 ```{r def-fit1, echo=T}
-fit <- lm(Crude ~ dist_cent, data=df_full)
+fit1 <- lm(Crude ~ dist_cent, data=df_full)
 ```
 
 ```{r}
-summary(fit) %>% pander()
+summary(fit1) %>% pander()
 ```
 
 
 ```{r}
-dx_plots(fit, df_full, plots = 1)
-dx_plots(fit, df_full, plots = 3)
+dx_plots(fit1, df_full, plots = 1)
+dx_plots(fit1, df_full, plots = 3)
 ```
 
 Sorted by top Cook's distance
 
 ```{r}
-broom::augment(fit, df_full) %>%
+broom::augment(fit1, df_full) %>%
   mutate(NAME = str_glue("{NAME}, {ST}")) %>%
   select(-ST, -Over75, -Deaths, -AgeAdj) %>%
   arrange(desc(.cooksd)) %>%
@@ -148,27 +175,33 @@ broom::augment(fit, df_full) %>%
 
 
 
-# Model 2
+# Model 2: Add covariates
+
+Multivariate regression with `dist_cent` and:
+
+- `log(pop12)`: Log of the 2012 ACS 5 year population estimate
+- `male`: Percent of the county that is male (based on 2012 estimate)
+- `Over65`: Percent of the county that is 65+ years old (based on 2012 estimate)
 
 ```{r def-fit2, echo=T}
-fit <- lm(Crude ~ dist_cent + log(pop12) + male + Over65, data=df_full)
+fit2 <- lm(Crude ~ dist_cent + log(pop12) + male + Over65, data=df_full)
 ```
 
 ```{r}
-summary(fit) %>% pander()
+summary(fit2) %>% pander()
 ```
 
 
 ```{r}
-dx_plots(fit, df_full, plots = 1, use_plotly=F)
-dx_plots(fit, df_full, plots = 3, use_plotly=F)
-dx_plots(fit, df_full, plots = 2, use_plotly=F)
+dx_plots(fit2, df_full, plots = 1, use_plotly=F)
+dx_plots(fit2, df_full, plots = 3, use_plotly=F)
+dx_plots(fit2, df_full, plots = 2, use_plotly=F)
 ```
 
 Sorted by top Cook's distance
 
 ```{r}
-broom::augment(fit, df_full) %>%
+broom::augment(fit2, df_full) %>%
   mutate(NAME = str_glue("{NAME}, {ST}")) %>%
   select(-ST, -Over75, -Deaths, -AgeAdj) %>%
   arrange(desc(.cooksd)) %>%
@@ -176,28 +209,29 @@ broom::augment(fit, df_full) %>%
   select(GEOID, NAME, .cooksd, everything())
 ```
 
-## Excluding influential points
+# Model 3: Excluding influential points
 
-```{r def-fit2-2, echo=T}
-df <- df_full %>%
-  filter(!GEOID %in% c("38053","20055","30085","12119"))
-fit <- lm(Crude ~ dist_cent + log(pop12) + male + Over65, data=df)
+```{r def-fit3, echo=T}
+df_sans_outliers <- df_full %>%
+  filter(!GEOID %in% c("38053","20055","30085","12119")) 
+fit3 <- lm(Crude ~ dist_cent + log(pop12) + male + Over65, data=df_sans_outliers)
 ```
 
 ```{r}
-summary(fit) %>% pander()
+summary(fit3) %>% pander()
 ```
 
 
 ```{r}
-dx_plots(fit, df, plots = 1)
-dx_plots(fit, df, plots = 3)
-dx_plots(fit, df, plots = 2, use_plotly=F)
+dx_plots(fit3, df_sans_outliers, plots = 1, use_plotly=F)
+dx_plots(fit3, df_sans_outliers, plots = 3, use_plotly=F)
+dx_plots(fit3, df_sans_outliers, plots = 2, use_plotly=F)
 ```
+
 Sorted by top Cook's distance
 
 ```{r}
-broom::augment(fit, df) %>%
+broom::augment(fit3, df_sans_outliers) %>%
   mutate(NAME = str_glue("{NAME}, {ST}")) %>%
   select(-ST, -Over75, -Deaths, -AgeAdj) %>%
   arrange(desc(.cooksd)) %>%
@@ -205,11 +239,72 @@ broom::augment(fit, df) %>%
   select(GEOID, NAME, .cooksd, everything())
 ```
 
-# experimental
+
+# Model 4: Adding regions
+
+```{r def-fit4, echo=T}
+fit4 <- update(fit3, .~. + region)
+# fit4 <- lm(Crude ~ dist_cent + log(pop12) + male + Over65 + ST, data=df_sans_outliers)
+```
+
+```{r}
+summary(fit4) %>% pander()
+```
+
+
+```{r}
+dx_plots(fit4, df_sans_outliers, plots = 1, use_plotly=F)
+dx_plots(fit4, df_sans_outliers, plots = 3, use_plotly=F)
+dx_plots(fit4, df_sans_outliers, plots = 2, use_plotly=F)
+```
+
+Sorted by top Cook's distance
+
+```{r}
+broom::augment(fit4, df_sans_outliers) %>%
+  mutate(NAME = str_glue("{NAME}, {ST}")) %>%
+  select(-ST, -Over75, -Deaths, -AgeAdj) %>%
+  arrange(desc(.cooksd)) %>%
+  mutate_if(is.numeric, round, 2) %>%
+  select(GEOID, NAME, .cooksd, everything())
+```
+
+# Model 5: Adding states
+
+```{r def-fit5, echo=T}
+fit5 <- update(fit3, .~. + ST)
+```
+
+```{r}
+fit5 %>% car::Anova(type=3)
+```
+
+
+```{r}
+dx_plots(fit5, df_sans_outliers, plots = 1, use_plotly=F)
+dx_plots(fit5, df_sans_outliers, plots = 3, use_plotly=F)
+dx_plots(fit5, df_sans_outliers, plots = 2, use_plotly=F)
+```
+
+Sorted by top Cook's distance
+
+```{r}
+broom::augment(fit5, df_sans_outliers) %>%
+  mutate(NAME = str_glue("{NAME}, {ST}")) %>%
+  select(-ST, -Over75, -Deaths, -AgeAdj) %>%
+  arrange(desc(.cooksd)) %>%
+  mutate_if(is.numeric, round, 2) %>%
+  select(GEOID, NAME, .cooksd, everything())
+```
+
+
+
+
+# Experimental
 
 ## Mapping residuals
 
-```{r, cache=TRUE}
+```{r map-residuals-3, cache=TRUE}
 library(sf) # newer, better version of sp
 library(tigris)
 library(leaflet)
@@ -219,7 +314,7 @@ options(tigris_use_cache = T)
 US_counties <- tigris::counties(state = c(state.abb, "DC"), cb=T) %>%
   filter(STATEFP!="02", STATEFP!="15")
 
-broom::augment(fit, df) %>%
+broom::augment(fit3, df_sans_outliers) %>%
   mutate(NAME = str_glue("{NAME}, {ST}")) %>%
   select(-ST, -Over75, -Deaths, -AgeAdj) %>%
   geo_join(US_counties, ., by="GEOID") %>%
@@ -231,6 +326,59 @@ broom::augment(fit, df) %>%
                        name="Residuals", direction=1) +
   # theme_dark()
   ggthemes::theme_map() +
+  labs(title = as.character(fit3[["call"]][["formula"]])[3]) +
+  theme(legend.direction="horizontal") 
+```
+
+```{r map-residuals-4, cache=TRUE}
+library(sf) # newer, better version of sp
+library(tigris) 
+library(leaflet)
+options(tigris_class = "sf")
+options(tigris_use_cache = T) 
+
+US_counties <- tigris::counties(state = c(state.abb, "DC"), cb=T) %>%
+  filter(STATEFP!="02", STATEFP!="15")
+
+broom::augment(fit4, df_sans_outliers) %>%
+  mutate(NAME = str_glue("{NAME}, {ST}")) %>%
+  select(-ST, -Over75, -Deaths, -AgeAdj) %>%
+  geo_join(US_counties, ., by="GEOID") %>%
+  ggplot() +
+  geom_sf(aes(fill=.resid), color=NA) + 
+  coord_sf(crs = 4269) +
+  scale_fill_distiller(palette="RdYlGn",# guide = 'legend',
+                       na.value = "grey50",
+                       name="Residuals", direction=1) +
+  # theme_dark()
+  ggthemes::theme_map() +
+  labs(title = as.character(fit4[["call"]][["formula"]])[3]) +
+  theme(legend.direction="horizontal") 
+```
+
+```{r map-residuals-5, cache=TRUE}
+library(sf) # newer, better version of sp
+library(tigris) 
+library(leaflet)
+options(tigris_class = "sf")
+options(tigris_use_cache = T)
+
+US_counties <- tigris::counties(state = c(state.abb, "DC"), cb=T) %>%
+  filter(STATEFP!="02", STATEFP!="15")
+
+broom::augment(fit5, df_sans_outliers) %>%
+  mutate(NAME = str_glue("{NAME}, {ST}")) %>%
+  select(-ST, -Over75, -Deaths, -AgeAdj) %>%
+  geo_join(US_counties, ., by="GEOID") %>%
+  ggplot() +
+  geom_sf(aes(fill=.resid), color=NA) + 
+  coord_sf(crs = 4269) +
+  scale_fill_distiller(palette="RdYlGn",# guide = 'legend',
+                       na.value = "grey50",
+                       name="Residuals", direction=1) +
+  # theme_dark()
+  ggthemes::theme_map() +
+  labs(title = as.character(fit5[["call"]][["formula"]])[3]) +
   theme(legend.direction="horizontal") 
 ```
 
