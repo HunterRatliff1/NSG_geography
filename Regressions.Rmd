@@ -1,0 +1,385 @@
+---
+title: "Regressions"
+author: "Hunter Ratliff"
+date: "2/10/2020"
+output:
+  html_document:
+    df_print: paged
+    code_folding: show
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=F, warning=F, message=F)
+library(plotly)
+library(crosstalk)
+library(tidyverse)
+library(ggthemes)
+library(scales)
+library(broom)
+library(pander)  # for pretty outputs
+```
+
+# Set up
+
+## Read in the data
+
+Reading in `Data/mergedToTBI_v2.csv`, and dropping any varaibles with NA's
+
+```{r readData}
+df_full <- read_csv("Data/mergedToTBI_v2.csv") %>%
+  select(-npi, -providerCity, -providerST) %>%
+  select(GEOID:Crude) %>%
+  filter(!is.na(Deaths)) %>% # drop counties with missing rates
+  filter(GEOID != "46102") # GEOID didn't match to ACS data
+
+# # Missing data
+# is.na(df_full) %>% colSums()
+
+glimpse(df_full)
+```
+
+## Plotly function
+
+Here's a wrapper that I made that makes a pretty _Residual vs Fitted_ and _QQ plots_ plot using plotly. It takes a fitted lm model (`lm_fit`) and uses plotly to return pretty diagnostic plots, similar to if you were to run plot(lm_fit). 
+
+```{r dx_plots, echo=T}
+dx_plots <- function(lm_fit, raw_data, plots=1, alpha=.25, use_plotly=T) {
+  ## lm_fit:   Fitted lm model
+  ##
+  ## raw_data: The data suppied to the fitted lm model. 
+  ##        !! NOTE: Each observation in this needs to match it's row in the
+  ##                 model matrix, so if the lm call is dropping any NA's
+  ##                 you need to drop them too before passing it to this function
+  ##
+  ## plots:   Which plot to return: 
+  ##            1 = Residual vs Fitted
+  ##            2 = QQ plot
+  ##            3 = Scale-location
+  ##
+  ## alpha:      Alpha value passed to ggplot (for dense plots)
+  ## use_plotly: Logical flag to return interactive plotly object. Defaults to
+  ##             true, but can change to false to cutdown on overhead/file size
+  
+  if(nrow(raw_data)!=nrow(model.matrix(lm_fit))){
+    return("Model matrix doesn't match suppiled data")
+  }
+  
+  ## Give unique ID for each regression, that way crosstalk
+  #  can link plots from the same regression
+  crosstalk_id <- str_c(lm_fit[["terms"]], collapse = "")
+  
+  ## augment the data with results of regression
+  df_fit <- broom::augment(lm_fit, raw_data) %>%
+    mutate(tooltip = str_glue("{NAME}, {ST}\nPredicted: {round(.fitted,1)}\nActual: {round(Crude,1)}\n\n")) %>%
+    mutate(hasProvider = dist_min==0) %>%
+    highlight_key(~tooltip, group="crosstalk_id")
+  
+  ## Residual vs Fitted
+  p1 <- df_fit %>%
+    ggplot(aes(x=.fitted, y=.resid)) + 
+    geom_hline(yintercept=0, color="red") +
+    geom_jitter(alpha=alpha, aes(text=tooltip, color=hasProvider)) +
+    geom_smooth(se=F) +
+    labs(title="Residual vs Fitted") +
+    theme_bw()
+  
+  ## Normal Q-Q
+  p2 <- df_fit %>%
+    ggplot(aes(sample=.std.resid)) +
+    geom_qq(alpha=alpha) +
+    geom_qq_line() +
+    labs(title="Normal QQ") +
+    theme_bw()
+  
+  ## Scale-Location
+  p3 <- df_fit %>%
+      ggplot(aes(x=.fitted, y=sqrt(abs(.std.resid)))) + 
+      geom_point(alpha=alpha, aes(text=tooltip, color=hasProvider)) +
+      geom_smooth(se=F) +
+      labs(title="Scale-Location") +
+      theme_bw()
+  
+  
+  if(use_plotly){
+    # pass tp plotly
+    if(plots==1) return(plotly::ggplotly(p1, tooltip=c("text", "x", "y")))
+    if(plots==2) return(plotly::ggplotly(p2, tooltip=c("text", "x", "y")))
+    if(plots==3) return(plotly::ggplotly(p3, tooltip=c("text", "x", "y")))
+  } else({
+    if(plots==1) return(p1)
+    if(plots==2) return(p2)
+    if(plots==3) return(p3)
+  })
+  
+}
+```
+
+# Model 1
+
+Simple linear regression
+
+```{r def-fit1, echo=T}
+fit <- lm(Crude ~ dist_cent, data=df_full)
+```
+
+```{r}
+summary(fit) %>% pander()
+```
+
+
+```{r}
+dx_plots(fit, df_full, plots = 1)
+dx_plots(fit, df_full, plots = 3)
+```
+
+Sorted by top Cook's distance
+
+```{r}
+broom::augment(fit, df_full) %>%
+  mutate(NAME = str_glue("{NAME}, {ST}")) %>%
+  select(-ST, -Over75, -Deaths, -AgeAdj) %>%
+  arrange(desc(.cooksd)) %>%
+  mutate_if(is.numeric, round, 2) %>%
+  select(GEOID, NAME, .cooksd, everything())
+```
+
+
+
+
+# Model 2
+
+```{r def-fit2, echo=T}
+fit <- lm(Crude ~ dist_cent + log(pop12) + male + Over65, data=df_full)
+```
+
+```{r}
+summary(fit) %>% pander()
+```
+
+
+```{r}
+dx_plots(fit, df_full, plots = 1, use_plotly=F)
+dx_plots(fit, df_full, plots = 3, use_plotly=F)
+dx_plots(fit, df_full, plots = 2, use_plotly=F)
+```
+
+Sorted by top Cook's distance
+
+```{r}
+broom::augment(fit, df_full) %>%
+  mutate(NAME = str_glue("{NAME}, {ST}")) %>%
+  select(-ST, -Over75, -Deaths, -AgeAdj) %>%
+  arrange(desc(.cooksd)) %>%
+  mutate_if(is.numeric, round, 2) %>%
+  select(GEOID, NAME, .cooksd, everything())
+```
+
+## Excluding influential points
+
+```{r def-fit2-2, echo=T}
+df <- df_full %>%
+  filter(!GEOID %in% c("38053","20055","30085","12119"))
+fit <- lm(Crude ~ dist_cent + log(pop12) + male + Over65, data=df)
+```
+
+```{r}
+summary(fit) %>% pander()
+```
+
+
+```{r}
+dx_plots(fit, df, plots = 1)
+dx_plots(fit, df, plots = 3)
+dx_plots(fit, df, plots = 2, use_plotly=F)
+```
+Sorted by top Cook's distance
+
+```{r}
+broom::augment(fit, df) %>%
+  mutate(NAME = str_glue("{NAME}, {ST}")) %>%
+  select(-ST, -Over75, -Deaths, -AgeAdj) %>%
+  arrange(desc(.cooksd)) %>%
+  mutate_if(is.numeric, round, 2) %>%
+  select(GEOID, NAME, .cooksd, everything())
+```
+
+# experimental
+
+## Mapping residuals
+
+```{r, cache=TRUE}
+library(sf) # newer, better version of sp
+library(tigris)
+library(leaflet)
+options(tigris_class = "sf")
+options(tigris_use_cache = T)
+
+US_counties <- tigris::counties(state = c(state.abb, "DC"), cb=T) %>%
+  filter(STATEFP!="02", STATEFP!="15")
+
+broom::augment(fit, df) %>%
+  mutate(NAME = str_glue("{NAME}, {ST}")) %>%
+  select(-ST, -Over75, -Deaths, -AgeAdj) %>%
+  geo_join(US_counties, ., by="GEOID") %>%
+  ggplot() +
+  geom_sf(aes(fill=.resid), color=NA) + 
+  coord_sf(crs = 4269) +
+  scale_fill_distiller(palette="RdYlGn",# guide = 'legend',
+                       na.value = "grey50",
+                       name="Residuals", direction=1) +
+  # theme_dark()
+  ggthemes::theme_map() +
+  theme(legend.direction="horizontal") 
+```
+
+
+## Using ggiraph & cowplot
+
+Very slow
+
+```{r ggiraph, eval=F}
+fit <- lm(Crude ~ dist_cent + ST + log(pop12) + male + Over65, data=df_full)
+fit_df <- broom::augment(fit, data=filter(df_full, !is.na(Crude), !is.na(pop12)))
+library(ggiraph)
+library(cowplot)
+
+
+
+## Residual vs Fitted
+tictoc::tic()
+p1 <- fit_df %>%
+  ggplot(aes(x=.fitted, y=.resid)) + 
+  geom_hline(yintercept=0, color="red") +
+  geom_point_interactive(aes(tooltip = NAME, data_id = GEOID),alpha=.15) +
+  # geom_jitter(alpha=.5) +
+  geom_smooth(se=F) +
+  labs(title="Residual vs Fitted") +
+  theme_bw()
+
+
+## Scale-Location
+p2 <- fit_df %>%
+  ggplot(aes(x=.fitted, y=sqrt(abs(.std.resid)))) + 
+  geom_point_interactive(aes(tooltip = NAME, data_id = GEOID),alpha=.15) +
+  # geom_point(alpha=.5) +
+  geom_smooth(se=F)
+
+
+girafe(ggobj = plot_grid(p1,p2))
+tictoc::toc()
+rm(p1, p2)
+```
+
+## Using plotly and crosstalk
+
+```{r crosstalk, eval=F}
+fit <- lm(Crude ~ dist_cent + ST + log(pop12) + male + Over65, data=df_full)
+library(crosstalk)
+fit_df <- broom::augment(fit, data=filter(df_full, !is.na(Crude), !is.na(pop12))) %>%
+  highlight_key(~GEOID, group="mytestgroup")
+
+library(plotly)
+## Residual vs Fitted
+tictoc::tic()
+p1 <- fit_df  %>% 
+    ggplot(aes(x=.fitted, y=.resid)) + 
+    geom_hline(yintercept=0, color="red") +
+    geom_jitter(alpha=.5) +
+    geom_smooth(se=F) +
+    labs(title="Residual vs Fitted") +
+    theme_bw()
+
+p2 <- fit_df %>%
+  ggplot(aes(sample=.std.resid)) +
+  geom_qq() +
+  geom_qq_line() +
+  labs(title="Normal QQ") +
+  theme_bw()
+   
+## Scale-Location
+p3 <- fit_df %>%
+    ggplot(aes(x=.fitted, y=sqrt(abs(.std.resid)))) + 
+    
+    geom_point(alpha=.5) +
+    geom_smooth(se=F) +
+    labs(title="Scale-Location") +
+    theme_bw()
+  
+
+subplot(ggplotly(p1, tooltip = "GEOID"), 
+        ggplotly(p2, tooltip = "GEOID"), 
+        titleX = T, titleY = T)
+tictoc::toc()
+rm(p1, p2)
+```
+
+```{r crosstalk2, eval=F}
+library(crosstalk)
+
+
+df <- mtcars %>%
+  rownames_to_column(var="carname") %>%
+  select(carname, mpg, cyl, hp, wt)
+
+p1 <- df %>%
+  # must use group="testgroup", so it will share the crosstalk
+  highlight_key(~carname, group="testgroup") %>% {
+    ggplot(., aes(wt, hp, group = carname)) + geom_point()
+  } %>%
+  ggplotly(tooltip = "carname")
+
+p2 <- df %>%
+  highlight_key(~carname, group="testgroup") %>% {
+    ggplot(., aes(wt, mpg, group = carname)) + geom_point()
+  } %>%
+  ggplotly(tooltip = "carname")
+
+subplot(p1, p2, titleX = T, titleY = T)
+rm(p1,p2,df)
+```
+
+```{r, eval=F}
+
+
+df <- df_full %>%
+  select(Crude, dist_cent, pop12, male, Over75)
+lm(Crude ~ dist_cent, data=df) %>% summary()
+
+lm(Crude ~ dist_cent + log(pop12) , data=df)
+
+
+
+fit <- lm(Crude ~ dist_cent, data=df_full)
+
+## Residual vs Fitted
+fit_df %>%
+  ggplot(aes(x=.fitted, y=.resid, tooltip = NAME, data_id = GEOID)) + 
+  geom_hline(yintercept=0, color="red") +
+  geom_point_interactive(aes(tooltip = NAME, data_id = GEOID),alpha=.15) +
+  # geom_jitter(alpha=.5) +
+  geom_smooth(se=F) +
+  labs(title="Residual vs Fitted") +
+  theme_bw()
+
+## Normal Q-Q
+# car::qqp(fit)
+fit_df %>%
+  ggplot(aes(sample=.std.resid)) +
+  geom_qq() +
+  geom_qq_line() +
+  labs(title="Normal QQ") +
+  theme_bw()
+
+## Scale-Location
+fit_df %>%
+  ggplot(aes(x=.fitted, y=sqrt(abs(.std.resid)))) + 
+  geom_point(alpha=.5) +
+  geom_smooth(se=F)
+
+
+
+
+# plot(fit)
+```

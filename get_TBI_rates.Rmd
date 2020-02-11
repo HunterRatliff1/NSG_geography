@@ -8,12 +8,13 @@ output: html_document
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, message=F, warning=F)
 library(tidyverse)
+library(purrr)
 library(glue)
 ```
 
-## Original county
+# Original county
 
-```{r cars}
+```{r original_data}
 TBIs_org <- read_csv("Data/TBI_Deaths.csv") %>%
   # Correct Shannon, SD to it's new name
   mutate(
@@ -25,7 +26,7 @@ TBIs_org <- read_csv("Data/TBI_Deaths.csv") %>%
 
 Traumatic Brain Injury, All Intents, All Races, All Ethnicities, Both Sexes, All Ages
 
-```{r overall-county}
+```{r overall-county, eval=FALSE}
 url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m8976144_csv"
 table.name <- read_csv(url)[[4,1]]
 table.id   <- read_csv(url)[[11,1]]
@@ -56,7 +57,7 @@ df %>% write_csv(glue("TBI_data/County/TBI_{pop.subset}_county.csv"))
 rm(url, table.name, table.id, pop.subset)
 ```
 
-```{r overall-state}
+```{r overall-state, eval=FALSE}
 url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m2106188_csv"
 table.name <- read_csv(url)[[4,1]]
 table.id   <- read_csv(url)[[11,1]]
@@ -84,7 +85,7 @@ rm(url, table.name, table.id, pop.subset)
 
 Traumatic Brain Injury, All Intents, All Races, All Ethnicities, **Males**, All Ages
 
-```{r males-county}
+```{r males-county, eval=FALSE}
 url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m7245223_csv"
 table.name <- read_csv(url)[[4,1]]
 table.id   <- read_csv(url)[[11,1]]
@@ -115,7 +116,7 @@ df %>% write_csv(glue("TBI_data/County/TBI_{pop.subset}_county.csv"))
 rm(url, table.name, table.id, pop.subset)
 ```
 
-```{r males-state}
+```{r males-state, eval=FALSE}
 url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m4328936_csv"
 table.name <- read_csv(url)[[4,1]]
 table.id   <- read_csv(url)[[11,1]]
@@ -141,7 +142,7 @@ rm(url, table.name, table.id, pop.subset)
 
 Traumatic Brain Injury, All Intents, All Races, All Ethnicities, **Females**, All Ages
 
-```{r females-county}
+```{r females-county, eval=FALSE}
 url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m4010307_csv"
 table.name <- read_csv(url)[[4,1]]
 table.id   <- read_csv(url)[[11,1]]
@@ -172,7 +173,7 @@ df %>% write_csv(glue("TBI_data/County/TBI_{pop.subset}_county.csv"))
 rm(url, table.name, table.id, pop.subset)
 ```
 
-```{r females-state}
+```{r females-state, eval=FALSE}
 url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m2518907_csv"
 table.name <- read_csv(url)[[4,1]]
 table.id   <- read_csv(url)[[11,1]]
@@ -199,7 +200,7 @@ rm(url, table.name, table.id, pop.subset)
 ## 65+ years old
 
 
-```{r age65-county}
+```{r age65-county, eval=FALSE}
 url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m7284009_csv"
 table.name <- read_csv(url)[[4,1]]
 table.id   <- read_csv(url)[[11,1]]
@@ -231,7 +232,7 @@ rm(url, table.name, table.id, pop.subset)
 glue("{100*round(nrow(filter(df, is.na(Deaths)))/nrow(df),3)}% missing")
 ```
 
-```{r age65-state}
+```{r age65-state, eval=FALSE}
 url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m3750744_csv"
 table.name <- read_csv(url)[[4,1]]
 table.id   <- read_csv(url)[[11,1]]
@@ -258,7 +259,7 @@ rm(url, table.name, table.id, pop.subset)
 
 ## Unintentional
 
-```{r unintentional-county}
+```{r unintentional-county, eval=FALSE}
 url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m3378873_csv"
 table.name <- read_csv(url)[[4,1]]
 table.id   <- read_csv(url)[[11,1]]
@@ -290,7 +291,7 @@ rm(url, table.name, table.id, pop.subset)
 glue("{100*round(nrow(filter(df, is.na(Deaths)))/nrow(df),3)}% missing")
 ```
 
-```{r unintentional-state}
+```{r unintentional-state, eval=FALSE}
 url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m4021328_csv"
 table.name <- read_csv(url)[[4,1]]
 table.id   <- read_csv(url)[[11,1]]
@@ -314,7 +315,7 @@ rm(url, table.name, table.id, pop.subset)
 
 ## Suicide
 
-```{r suicide-county}
+```{r suicide-county, eval=FALSE}
 url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m509846_csv"
 table.name <- read_csv(url)[[4,1]]
 table.id   <- read_csv(url)[[11,1]]
@@ -346,7 +347,7 @@ rm(url, table.name, table.id, pop.subset)
 glue("{100*round(nrow(filter(df, is.na(Deaths)))/nrow(df),3)}% missing")
 ```
 
-```{r suicide-state}
+```{r suicide-state, eval=FALSE}
 url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m8496524_csv"
 table.name <- read_csv(url)[[4,1]]
 table.id   <- read_csv(url)[[11,1]]
@@ -372,7 +373,7 @@ rm(url, table.name, table.id, pop.subset)
 
 ## Transportation
 
-```{r transportation-county}
+```{r transportation-county, eval=FALSE}
 url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m3529311_csv"
 table.name <- read_csv(url)[[4,1]]
 table.id   <- read_csv(url)[[11,1]]
@@ -404,7 +405,7 @@ rm(url, table.name, table.id, pop.subset)
 glue("{100*round(nrow(filter(df, is.na(Deaths)))/nrow(df),3)}% missing")
 ```
 
-```{r transportation-state}
+```{r transportation-state, eval=FALSE}
 url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m8177371_csv"
 table.name <- read_csv(url)[[4,1]]
 table.id   <- read_csv(url)[[11,1]]
@@ -428,7 +429,7 @@ rm(url, table.name, table.id, pop.subset)
 
 ## Fall
 
-```{r fall-county}
+```{r fall-county, eval=FALSE}
 url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m4794739_csv"
 table.name <- read_csv(url)[[4,1]]
 table.id   <- read_csv(url)[[11,1]]
@@ -460,7 +461,7 @@ rm(url, table.name, table.id, pop.subset)
 glue("{100*round(nrow(filter(df, is.na(Deaths)))/nrow(df),3)}% missing")
 ```
 
-```{r fall-state}
+```{r fall-state, eval=FALSE}
 url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m7228039_csv"
 table.name <- read_csv(url)[[4,1]]
 table.id   <- read_csv(url)[[11,1]]
@@ -484,7 +485,7 @@ rm(url, table.name, table.id, pop.subset)
 
 ## Firearm
 
-```{r firearm-county}
+```{r firearm-county, eval=FALSE}
 url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m6453951_csv"
 table.name <- read_csv(url)[[4,1]]
 table.id   <- read_csv(url)[[11,1]]
@@ -516,7 +517,7 @@ rm(url, table.name, table.id, pop.subset)
 glue("{100*round(nrow(filter(df, is.na(Deaths)))/nrow(df),3)}% missing")
 ```
 
-```{r firearm-state}
+```{r firearm-state, eval=FALSE}
 url <- "https://wisqars.cdc.gov:8443/cdcMapFramework/ExcelServlet?excelFile=m6384422_csv"
 table.name <- read_csv(url)[[4,1]]
 table.id   <- read_csv(url)[[11,1]]
@@ -537,3 +538,50 @@ View(df)
 df %>% write_csv(glue("TBI_data/State/TBI_{pop.subset}_state.csv"))
 rm(url, table.name, table.id, pop.subset)
 ```
+
+# Patterns of missing data
+
+```{r}
+csv_df <- tibble(
+  tbl_name = c("Overall", "males", "females", "65+ year old", 
+               "unintentional", "suicide", 
+               "transportation", "fall", "firearm"),
+  tbl_category = c("Overall", "Sex", "Sex", "Age", 
+                   "Intent", "Intent",
+                   "Mechanism", "Mechanism", "Mechanism")
+) %>%
+  mutate(path = glue("TBI_data/county/TBI_{tbl_name}_county.csv")) %>%
+  mutate(df = map(path, ~read_csv(.x)))
+
+df <- bind_cols(
+  # Overall 
+  select(mutate(csv_df$df[[1]], missing=is.na(Deaths)), GEOID, ST, County, Overall=missing),
+  # Male
+  select(mutate(csv_df$df[[2]], missing=is.na(Deaths)), male=missing),
+  # Female
+  select(mutate(csv_df$df[[3]], missing=is.na(Deaths)), female=missing),
+  # Older
+  select(mutate(csv_df$df[[4]], missing=is.na(Deaths)), older=missing),
+  # unintentional
+  select(mutate(csv_df$df[[5]], missing=is.na(Deaths)), unintentional=missing),
+  # suicide
+  select(mutate(csv_df$df[[6]], missing=is.na(Deaths)), suicide=missing),
+  # transportation
+  select(mutate(csv_df$df[[7]], missing=is.na(Deaths)), transportation=missing),
+  # fall
+  select(mutate(csv_df$df[[8]], missing=is.na(Deaths)), fall=missing),
+  # firearm
+  select(mutate(csv_df$df[[9]], missing=is.na(Deaths)), firearm=missing)
+) %>%
+  mutate(NAME = str_glue("{County}, {ST}")) %>%
+  select(GEOID, NAME, everything()) %>%
+  select(-ST, -County)
+
+colSums(df[-1:-2])/nrow(df)
+
+cor(df[-1:-2])
+
+```
+
+
+
