@@ -21,3 +21,6 @@ rsconnect
 *.pdf
 
 .CensusAPIkey.R
+
+# Personal correspondence files
+Email.Rmd
