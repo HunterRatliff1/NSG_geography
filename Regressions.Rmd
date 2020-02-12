@@ -12,18 +12,32 @@ output:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo=F, warning=F, message=F)
-library(plotly)
-library(crosstalk)
+library(plotly)    # Making interactive plots
+library(crosstalk) # linking html widgets
+
+library(sf)        # better version of sp, for plotting geography
+library(tigris)    # for getting shapefiles
+
 library(tidyverse)
 library(ggthemes)
 library(scales)
-library(broom)
-library(pander)  # for pretty outputs
+library(cowplot)   # plotting multiple ggplots in one
+
+library(broom)     # to augment models
+library(pander)    # for pretty outputs
+
+# settings for tigris
+options(tigris_class = "sf")
+options(tigris_use_cache = T) 
+
+# get shapefiles for US counties
+US_counties <- tigris::counties(state = c(state.abb, "DC"), cb=T) %>%
+  filter(STATEFP!="02", STATEFP!="15")
 ```
 
 Source RMD located at: https://github.com/HunterRatliff1/NSG_geography/blob/master/Regressions.Rmd
 
-```{r ST_regions}
+```{r ST_regions, eval=F}
 ST_regions <- maps::state.fips %>%
   mutate(region = case_when(region==1 ~"NORTHEAST",
                             region==2 ~"MIDWEST",
@@ -38,19 +52,23 @@ ST_regions <- maps::state.fips %>%
                               division==7 ~"West South Central",
                               division==8 ~"Mountain",
                               division==9 ~"Pacific")) %>%
+  mutate(region   = factor(region),
+         division = factor(division)) %>%
   rename(ST=abb) %>%
   group_by(ST) %>%
   sample_n(1) %>%
-  select(ST, region, division)
+  select(ST, region, division) %>%
+  mutate(region   = forcats::fct_relevel(region, "NORTHEAST"),
+         division = forcats::fct_relevel(division, "New England"))
 ```
 
 # Set up
 
 ## Read in the data
 
-Reading in `Data/mergedToTBI_v2.csv`, and dropping any varaibles with NA's
+Reading in `Data/mergedToTBI_v2.csv`, and dropping any varaibles with NA's. I'm also linking in the census regions and divisions (more on this below) to attempt to account for some of the geographical variance^[I don't have much experience with modeling geographic data, so perhaps advice from Dr Prochaska would be warranted] (see the last section of this report).
 
-```{r readData}
+```{r readData, eval=F}
 df_full <- read_csv("Data/mergedToTBI_v2.csv") %>%
   select(-npi, -providerCity, -providerST) %>%
   select(GEOID:Crude) %>%
@@ -61,15 +79,29 @@ df_full <- read_csv("Data/mergedToTBI_v2.csv") %>%
 # # Missing data
 # is.na(df_full) %>% colSums()
 
+df_full %>% write_csv("public_data/regression.csv")
+```
+
+Glimpse of the data.frame, which is available on github 
+
+```{r, echo=T}
+### Run this line to get the data
+df_full <- read_csv("https://raw.githubusercontent.com/HunterRatliff1/NSG_geography/master/public_data/regression.csv") %>%
+  mutate(region   = factor(region),
+         division = factor(division)) %>%
+  mutate(region   = forcats::fct_relevel(region, "NORTHEAST"),
+         division = forcats::fct_relevel(division, "New England"))
+
 glimpse(df_full)
 ```
 
 
 
 
+
 ## Plotly function
 
-Here's a wrapper that I made that makes a pretty _Residual vs Fitted_ and _QQ plots_ plot using plotly. It takes a fitted lm model (`lm_fit`) and uses plotly to return pretty diagnostic plots, similar to if you were to run plot(lm_fit). 
+Here's a wrapper that I made that makes a pretty diagnostic plots using plotly. It takes a fitted lm model (`lm_fit`) and uses plotly to return pretty diagnostic plots, similar to if you were to run plot(lm_fit). 
 
 ```{r dx_plots, echo=T}
 dx_plots <- function(lm_fit, raw_data, plots=1, alpha=.25, use_plotly=T) {
@@ -81,27 +113,40 @@ dx_plots <- function(lm_fit, raw_data, plots=1, alpha=.25, use_plotly=T) {
   ##                 you need to drop them too before passing it to this function
   ##
   ## plots:   Which plot to return: 
-  ##            1 = Residual vs Fitted
-  ##            2 = QQ plot
-  ##            3 = Scale-location
+  ##            1   = Residual vs Fitted
+  ##            2   = QQ plot
+  ##            3   = Scale-location
+  ##            4   = Residuals vs Leverage
+  ##            All = Returns all 4 as ggplots (ignores plotly flag)
   ##
   ## alpha:      Alpha value passed to ggplot (for dense plots)
   ## use_plotly: Logical flag to return interactive plotly object. Defaults to
   ##             true, but can change to false to cutdown on overhead/file size
   
+  
+  ## Gives error if not the same number of rows
   if(nrow(raw_data)!=nrow(model.matrix(lm_fit))){
     return("Model matrix doesn't match suppiled data")
   }
   
   ## Give unique ID for each regression, that way crosstalk
   #  can link plots from the same regression
-  crosstalk_id <- str_c(lm_fit[["terms"]], collapse = "")
+  mod_formula <- as.character(lm_fit[["call"]][["formula"]])
+  crosstalk_id <- as.character(str_glue("{mod_formula[2]} ~ {mod_formula[3]}"))
   
   ## augment the data with results of regression
   df_fit <- broom::augment(lm_fit, raw_data) %>%
-    mutate(tooltip = str_glue("{NAME}, {ST}\nPredicted: {round(.fitted,1)}\nActual: {round(Crude,1)}\n\n")) %>%
+    mutate(tooltip = str_glue("{NAME}, {ST} ({GEOID})\n",
+                              "Predicted: {round(.fitted,1)}\n",
+                              "Actual: {round(Crude,1)}\n",
+                              "Cook's Distance: {round(.cooksd,3)}\n\n")) %>%
     mutate(hasProvider = dist_min==0) %>%
     highlight_key(~tooltip, group="crosstalk_id")
+  
+  ## Set theme
+  theme_set(theme_bw()+theme(legend.position = "bottom"))
+  
+  
   
   ## Residual vs Fitted
   p1 <- df_fit %>%
@@ -109,35 +154,48 @@ dx_plots <- function(lm_fit, raw_data, plots=1, alpha=.25, use_plotly=T) {
     geom_hline(yintercept=0, color="red") +
     geom_jitter(alpha=alpha, aes(text=tooltip, color=hasProvider)) +
     geom_smooth(se=F) +
-    labs(title="Residual vs Fitted") +
-    theme_bw()
+    labs(title="Residual vs Fitted", subtitle=mod_formula[3]) 
   
   ## Normal Q-Q
   p2 <- df_fit %>%
     ggplot(aes(sample=.std.resid)) +
     geom_qq(alpha=alpha) +
     geom_qq_line() +
-    labs(title="Normal QQ") +
-    theme_bw()
+    labs(title="Normal QQ", subtitle=mod_formula[3]) 
   
   ## Scale-Location
   p3 <- df_fit %>%
       ggplot(aes(x=.fitted, y=sqrt(abs(.std.resid)))) + 
       geom_point(alpha=alpha, aes(text=tooltip, color=hasProvider)) +
       geom_smooth(se=F) +
-      labs(title="Scale-Location") +
-      theme_bw()
+      labs(title="Scale-Location", subtitle=mod_formula[3]) 
   
+  ## Residuals vs Leverage
+  p4 <- df_fit %>%
+    ggplot(aes(x=.hat, y=.std.resid)) + 
+    geom_point(alpha=alpha, aes(text=tooltip, color=hasProvider)) +
+    geom_smooth(se=F) +
+    labs(title="Residuals vs Leverage", subtitle=mod_formula[3]) 
+  
+  
+  
+  ## If "All", then return ggplot regardless of plotly flag
+  if(plots=="All"|plots=="all"){
+    library(cowplot)
+    return(cowplot::plot_grid(p1, p2, p3, p4))
+  }
   
   if(use_plotly){
-    # pass tp plotly
+    # pass to plotly
     if(plots==1) return(plotly::ggplotly(p1, tooltip=c("text", "x", "y")))
     if(plots==2) return(plotly::ggplotly(p2, tooltip=c("text", "x", "y")))
     if(plots==3) return(plotly::ggplotly(p3, tooltip=c("text", "x", "y")))
+    if(plots==4) return(plotly::ggplotly(p4, tooltip=c("text", "x", "y")))
   } else({
     if(plots==1) return(p1)
     if(plots==2) return(p2)
     if(plots==3) return(p3)
+    if(plots==4) return(p4)
   })
   
 }
@@ -156,9 +214,8 @@ summary(fit1) %>% pander()
 ```
 
 
-```{r}
-dx_plots(fit1, df_full, plots = 1)
-dx_plots(fit1, df_full, plots = 3)
+```{r fig.height=8}
+dx_plots(fit1, df_full, plots = "All", use_plotly=F)
 ```
 
 Sorted by top Cook's distance
@@ -169,10 +226,9 @@ broom::augment(fit1, df_full) %>%
   select(-ST, -Over75, -Deaths, -AgeAdj) %>%
   arrange(desc(.cooksd)) %>%
   mutate_if(is.numeric, round, 2) %>%
-  select(GEOID, NAME, .cooksd, everything())
+  select(GEOID, NAME, .cooksd, everything()) %>%
+  top_n(10, wt=.cooksd) 
 ```
-
-
 
 
 # Model 2: Add covariates
@@ -192,10 +248,8 @@ summary(fit2) %>% pander()
 ```
 
 
-```{r}
-dx_plots(fit2, df_full, plots = 1, use_plotly=F)
-dx_plots(fit2, df_full, plots = 3, use_plotly=F)
-dx_plots(fit2, df_full, plots = 2, use_plotly=F)
+```{r fig.height=8}
+dx_plots(fit2, df_full, plots = "All", use_plotly=F)
 ```
 
 Sorted by top Cook's distance
@@ -206,14 +260,24 @@ broom::augment(fit2, df_full) %>%
   select(-ST, -Over75, -Deaths, -AgeAdj) %>%
   arrange(desc(.cooksd)) %>%
   mutate_if(is.numeric, round, 2) %>%
-  select(GEOID, NAME, .cooksd, everything())
+  select(GEOID, NAME, .cooksd, everything()) %>%
+  top_n(10, wt=.cooksd) 
 ```
 
-# Model 3: Excluding influential points
+# Model 3: Excluding influential's
+
+Remove some of the influentail points, namely:
+
+```{r}
+outliers <- c("38053","20055","30085","12119","30021")
+broom::augment(fit2, df_full) %>%
+  filter(GEOID %in% outliers)
+```
+
 
 ```{r def-fit3, echo=T}
 df_sans_outliers <- df_full %>%
-  filter(!GEOID %in% c("38053","20055","30085","12119")) 
+  filter(!GEOID %in% outliers) 
 fit3 <- lm(Crude ~ dist_cent + log(pop12) + male + Over65, data=df_sans_outliers)
 ```
 
@@ -222,10 +286,8 @@ summary(fit3) %>% pander()
 ```
 
 
-```{r}
-dx_plots(fit3, df_sans_outliers, plots = 1, use_plotly=F)
-dx_plots(fit3, df_sans_outliers, plots = 3, use_plotly=F)
-dx_plots(fit3, df_sans_outliers, plots = 2, use_plotly=F)
+```{r fig.height=8}
+dx_plots(fit3, df_sans_outliers, plots = "All", use_plotly=F)
 ```
 
 Sorted by top Cook's distance
@@ -236,14 +298,24 @@ broom::augment(fit3, df_sans_outliers) %>%
   select(-ST, -Over75, -Deaths, -AgeAdj) %>%
   arrange(desc(.cooksd)) %>%
   mutate_if(is.numeric, round, 2) %>%
-  select(GEOID, NAME, .cooksd, everything())
+  select(GEOID, NAME, .cooksd, everything()) %>%
+  top_n(10, wt=.cooksd) 
 ```
 
+# Factoring in geography
 
-# Model 4: Adding regions
+I suspect that geography might be influencing the mortality rate beyond just the distance. Take a look at the first figure under that **Experimental** > **Mapping residuals** section. The counties in states bordering Ontario appear to have negative residuals, while the counties in the Mountian time zone generally have positive residuals. 
+
+For this reason, I want to try factoring in the county's Region or Divisions, as defined below:
+
+![Census Regions and Divisions](https://upload.wikimedia.org/wikipedia/commons/thumb/f/f1/Census_Regions_and_Division_of_the_United_States.svg/800px-Census_Regions_and_Division_of_the_United_States.svg.png)
+
+## Model 4: Adding divisions
+
+This uses the same regression as fit 3, but also incorporates the county's division
 
 ```{r def-fit4, echo=T}
-fit4 <- update(fit3, .~. + region)
+fit4 <- update(fit3, .~. + division)
 # fit4 <- lm(Crude ~ dist_cent + log(pop12) + male + Over65 + ST, data=df_sans_outliers)
 ```
 
@@ -252,10 +324,8 @@ summary(fit4) %>% pander()
 ```
 
 
-```{r}
-dx_plots(fit4, df_sans_outliers, plots = 1, use_plotly=F)
-dx_plots(fit4, df_sans_outliers, plots = 3, use_plotly=F)
-dx_plots(fit4, df_sans_outliers, plots = 2, use_plotly=F)
+```{r fig.height=8}
+dx_plots(fit4, df_sans_outliers, plots = "All", use_plotly=F)
 ```
 
 Sorted by top Cook's distance
@@ -266,24 +336,34 @@ broom::augment(fit4, df_sans_outliers) %>%
   select(-ST, -Over75, -Deaths, -AgeAdj) %>%
   arrange(desc(.cooksd)) %>%
   mutate_if(is.numeric, round, 2) %>%
-  select(GEOID, NAME, .cooksd, everything())
+  select(GEOID, NAME, .cooksd, everything()) %>%
+  top_n(10, wt=.cooksd) 
 ```
 
-# Model 5: Adding states
+More detailed (and interactive) look at residual vs leverage
+
+```{r}
+dx_plots(fit4, df_sans_outliers, plots = 4)
+```
+
+
+## Model 5: Adding states
+
+Instead of using divisions, this uses states. Probably overfitting...
 
 ```{r def-fit5, echo=T}
 fit5 <- update(fit3, .~. + ST)
 ```
 
+Type 3 ANOVA
+
 ```{r}
-fit5 %>% car::Anova(type=3)
+fit5 %>% car::Anova(type=3) %>% pander()
 ```
 
 
-```{r}
-dx_plots(fit5, df_sans_outliers, plots = 1, use_plotly=F)
-dx_plots(fit5, df_sans_outliers, plots = 3, use_plotly=F)
-dx_plots(fit5, df_sans_outliers, plots = 2, use_plotly=F)
+```{r fig.height=8}
+dx_plots(fit5, df_sans_outliers, plots = "All", use_plotly=F)
 ```
 
 Sorted by top Cook's distance
@@ -294,20 +374,22 @@ broom::augment(fit5, df_sans_outliers) %>%
   select(-ST, -Over75, -Deaths, -AgeAdj) %>%
   arrange(desc(.cooksd)) %>%
   mutate_if(is.numeric, round, 2) %>%
-  select(GEOID, NAME, .cooksd, everything())
+  select(GEOID, NAME, .cooksd, everything()) %>%
+  top_n(10, wt=.cooksd) 
 ```
 
-
+For what it's worth, the crazy outlier in the _residual vs leverage_ is Washington DC, which makes sense as it's the only "county" in that "state".
 
 
 # Experimental
 
 ## Mapping residuals
 
+These are maps demonstrating plotting the residuals (as a map) for regressions 3, 4, and 5
+
 ```{r map-residuals-3, cache=TRUE}
 library(sf) # newer, better version of sp
 library(tigris)
-library(leaflet)
 options(tigris_class = "sf")
 options(tigris_use_cache = T)
 
@@ -331,15 +413,6 @@ broom::augment(fit3, df_sans_outliers) %>%
 ```
 
 ```{r map-residuals-4, cache=TRUE}
-library(sf) # newer, better version of sp
-library(tigris) 
-library(leaflet)
-options(tigris_class = "sf")
-options(tigris_use_cache = T) 
-
-US_counties <- tigris::counties(state = c(state.abb, "DC"), cb=T) %>%
-  filter(STATEFP!="02", STATEFP!="15")
-
 broom::augment(fit4, df_sans_outliers) %>%
   mutate(NAME = str_glue("{NAME}, {ST}")) %>%
   select(-ST, -Over75, -Deaths, -AgeAdj) %>%
@@ -357,15 +430,6 @@ broom::augment(fit4, df_sans_outliers) %>%
 ```
 
 ```{r map-residuals-5, cache=TRUE}
-library(sf) # newer, better version of sp
-library(tigris) 
-library(leaflet)
-options(tigris_class = "sf")
-options(tigris_use_cache = T)
-
-US_counties <- tigris::counties(state = c(state.abb, "DC"), cb=T) %>%
-  filter(STATEFP!="02", STATEFP!="15")
-
 broom::augment(fit5, df_sans_outliers) %>%
   mutate(NAME = str_glue("{NAME}, {ST}")) %>%
   select(-ST, -Over75, -Deaths, -AgeAdj) %>%
@@ -382,10 +446,21 @@ broom::augment(fit5, df_sans_outliers) %>%
   theme(legend.direction="horizontal") 
 ```
 
+## Using plotly and crosstalk
+
+The function defined at the beginning of this report, `dx_plots()`, is designed to give interactive exploration of the regression diagnostic plots. Clicking on a point in one plot "highlights" it across all other plots for that regression. 
+
+I've demonstrated an example of this using the regression #3 below. Because we have such a large dataset, were I to include these plotly figures for each regression, it nearly doubles the file size
+
+```{r crosstalk}
+dx_plots(fit3, df_sans_outliers, plots=1)
+dx_plots(fit3, df_sans_outliers, plots=3)
+dx_plots(fit3, df_sans_outliers, plots=4)
+```
 
 ## Using ggiraph & cowplot
 
-Very slow
+Not eval'ed, because it's very slow with such a large dataset. But this might be something that you incorporate into your "monster" script, since it's more pretty than using plotly
 
 ```{r ggiraph, eval=F}
 fit <- lm(Crude ~ dist_cent + ST + log(pop12) + male + Over65, data=df_full)
@@ -420,114 +495,3 @@ tictoc::toc()
 rm(p1, p2)
 ```
 
-## Using plotly and crosstalk
-
-```{r crosstalk, eval=F}
-fit <- lm(Crude ~ dist_cent + ST + log(pop12) + male + Over65, data=df_full)
-library(crosstalk)
-fit_df <- broom::augment(fit, data=filter(df_full, !is.na(Crude), !is.na(pop12))) %>%
-  highlight_key(~GEOID, group="mytestgroup")
-
-library(plotly)
-## Residual vs Fitted
-tictoc::tic()
-p1 <- fit_df  %>% 
-    ggplot(aes(x=.fitted, y=.resid)) + 
-    geom_hline(yintercept=0, color="red") +
-    geom_jitter(alpha=.5) +
-    geom_smooth(se=F) +
-    labs(title="Residual vs Fitted") +
-    theme_bw()
-
-p2 <- fit_df %>%
-  ggplot(aes(sample=.std.resid)) +
-  geom_qq() +
-  geom_qq_line() +
-  labs(title="Normal QQ") +
-  theme_bw()
-   
-## Scale-Location
-p3 <- fit_df %>%
-    ggplot(aes(x=.fitted, y=sqrt(abs(.std.resid)))) + 
-    
-    geom_point(alpha=.5) +
-    geom_smooth(se=F) +
-    labs(title="Scale-Location") +
-    theme_bw()
-  
-
-subplot(ggplotly(p1, tooltip = "GEOID"), 
-        ggplotly(p2, tooltip = "GEOID"), 
-        titleX = T, titleY = T)
-tictoc::toc()
-rm(p1, p2)
-```
-
-```{r crosstalk2, eval=F}
-library(crosstalk)
-
-
-df <- mtcars %>%
-  rownames_to_column(var="carname") %>%
-  select(carname, mpg, cyl, hp, wt)
-
-p1 <- df %>%
-  # must use group="testgroup", so it will share the crosstalk
-  highlight_key(~carname, group="testgroup") %>% {
-    ggplot(., aes(wt, hp, group = carname)) + geom_point()
-  } %>%
-  ggplotly(tooltip = "carname")
-
-p2 <- df %>%
-  highlight_key(~carname, group="testgroup") %>% {
-    ggplot(., aes(wt, mpg, group = carname)) + geom_point()
-  } %>%
-  ggplotly(tooltip = "carname")
-
-subplot(p1, p2, titleX = T, titleY = T)
-rm(p1,p2,df)
-```
-
-```{r, eval=F}
-
-
-df <- df_full %>%
-  select(Crude, dist_cent, pop12, male, Over75)
-lm(Crude ~ dist_cent, data=df) %>% summary()
-
-lm(Crude ~ dist_cent + log(pop12) , data=df)
-
-
-
-fit <- lm(Crude ~ dist_cent, data=df_full)
-
-## Residual vs Fitted
-fit_df %>%
-  ggplot(aes(x=.fitted, y=.resid, tooltip = NAME, data_id = GEOID)) + 
-  geom_hline(yintercept=0, color="red") +
-  geom_point_interactive(aes(tooltip = NAME, data_id = GEOID),alpha=.15) +
-  # geom_jitter(alpha=.5) +
-  geom_smooth(se=F) +
-  labs(title="Residual vs Fitted") +
-  theme_bw()
-
-## Normal Q-Q
-# car::qqp(fit)
-fit_df %>%
-  ggplot(aes(sample=.std.resid)) +
-  geom_qq() +
-  geom_qq_line() +
-  labs(title="Normal QQ") +
-  theme_bw()
-
-## Scale-Location
-fit_df %>%
-  ggplot(aes(x=.fitted, y=sqrt(abs(.std.resid)))) + 
-  geom_point(alpha=.5) +
-  geom_smooth(se=F)
-
-
-
-
-# plot(fit)
-```
