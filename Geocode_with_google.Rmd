@@ -94,7 +94,9 @@ NSG <- read_csv("Data/raw_NSG.csv") %>%
 print(NSG)
 ```
 
-# Round 1 
+# Geocode by name
+
+## Round 1 
 
 Okay, let's do this. My first pass of the data (which took ~45 mins) was done by re-running the code below until all the NPIs had been sent to the API
 
@@ -127,7 +129,7 @@ API_r1 %>%
   select(npi:city, -SearchQuery)
 ```
 
-# Round 2
+## Round 2
 
 ```{r Round2, eval=F, echo=T}
 # API_r2 <- filter(API_r1, !FirstPass) %>%
@@ -173,7 +175,7 @@ API_r2 %>% group_by(PassNum, loctype, type) %>%
   arrange(PassNum, desc(n_records))
 ```
 
-# Post-processing
+## Post-processing
 
 First we'll combine the results from the first pass and the successful second pass into one tibble. We'll exclude results that returned from  countries outside of the US (only four results: UK, Canada, India, Mexico) and extract the state, city, zipcode, and street addresses returned from Google. These will be stored as `geoXXX` to avoid confusion with the `city` and `state` columns from the NPI database. This will be stored as `geo_google_raw`.
 
@@ -211,7 +213,7 @@ geo_google_raw <- API_r1 %>%
 # geo_google_raw %>% write_csv("Google_results/geo_google_raw.csv")
 ```
 
-# Merging to County data
+## Merging to County data
 
 ```{r}
 geo_google_raw <- read_csv("Google_results/geo_google_raw.csv")
@@ -237,6 +239,74 @@ provs %>%
   left_join(geo_google_raw, .) %>% 
   write_csv("Google_results/geo_google_raw.csv")
 rm(i, c, provs, US_counties)
+```
+
+# Geocode provided address
+
+In the first section, we used a more advanced geocoding technique to search by provider name. Now we'll just do the simple look up based on the given address associated with their NPI
+
+```{r}
+# first round used NSG (vs NSG_2)
+NSG_2 <- read_csv("Data/raw_NSG.csv") %>%
+  select(npi, street, city, state, zip, country) %>%
+  unique() %>%
+  mutate(
+    SearchQuery = str_glue("{street}, {city}, {state}, {zip}"),
+    SearchQuery = str_to_lower(SearchQuery)
+  ) %>%
+  select(npi, SearchQuery)
+```
+
+## Round 1
+
+```{r, eval=F, message=T, echo=T}
+if(!exists("NSG2_called")){ # only run once
+  NSG2_called <- stepwise_call(NSG_2, n=21) 
+}
+
+# Keep re-running as needed
+tictoc::tic()
+NSG2_called <- stepwise_call(NSG_2, df_called=NSG2_called, n = 900)
+beepr::beep(3)
+tictoc::toc()
+
+# save as you go
+NSG2_called %>% write_csv("Google_results/geo_npi_byAddress_R1-5.csv")
+```
+
+Once that's done, run this:
+
+```{r, eval=F, message=T, echo=T}
+NSG2_final <- NSG2_called %>% 
+  select(npi, lon, lat, loctype, address) %>%
+  mutate(geoAddress = address) %>%
+  
+  # Filter by only USA
+  mutate(
+    geoCountry = str_extract(address, "(?<=, )\\w+$"),
+    address    = str_replace(address, ", \\w+$", "")
+  ) %>%
+  filter(geoCountry=="usa") %>%
+    
+  mutate(
+    # Grabs state & zip
+    geoState  = str_extract(address, "(?<=, )\\w\\w \\d+$"),
+    address   = str_replace(address, ", \\w\\w \\d+$", ""), 
+    # Now grab city
+    geoCity   = str_extract(address, "(?<=, )(\\w| )+$"),
+    # Extract zip from state 
+    geoZip    = str_extract(geoState, "\\d+$"),
+    geoState  = str_extract(geoState, "^\\w\\w"),
+    
+    # call the remainder street
+    geoStreet = str_replace(address, ", (\\w| )+$", "")
+  ) %>%
+  dplyr::select(-address)
+  
+  
+  
+  
+NSG2_final %>% write_csv("Google_results/geo_npi_byAddress.csv")
 ```
 
 
