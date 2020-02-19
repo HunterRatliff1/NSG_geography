@@ -463,8 +463,12 @@ dx_plots(fit3, df_sans_outliers, plots=4)
 Not eval'ed, because it's very slow with such a large dataset. But this might be something that you incorporate into your "monster" script, since it's more pretty than using plotly
 
 ```{r ggiraph, eval=F}
-fit <- lm(Crude ~ dist_cent + ST + log(pop12) + male + Over65, data=df_full)
-fit_df <- broom::augment(fit, data=filter(df_full, !is.na(Crude), !is.na(pop12)))
+
+  
+mt_fit    <- lm(mpg~hp+drat+disp, data=rownames_to_column(mtcars))
+mt_fit_df <- broom::augment(mt_fit, rownames_to_column(mtcars))
+
+
 library(ggiraph)
 library(cowplot)
 
@@ -472,10 +476,10 @@ library(cowplot)
 
 ## Residual vs Fitted
 tictoc::tic()
-p1 <- fit_df %>%
+p1 <- mt_fit_df %>%
   ggplot(aes(x=.fitted, y=.resid)) + 
   geom_hline(yintercept=0, color="red") +
-  geom_point_interactive(aes(tooltip = NAME, data_id = GEOID),alpha=.15) +
+  geom_point_interactive(aes(tooltip = rowname, data_id = rowname),alpha=.15) +
   # geom_jitter(alpha=.5) +
   geom_smooth(se=F) +
   labs(title="Residual vs Fitted") +
@@ -483,15 +487,15 @@ p1 <- fit_df %>%
 
 
 ## Scale-Location
-p2 <- fit_df %>%
+p2 <- mt_fit_df %>%
   ggplot(aes(x=.fitted, y=sqrt(abs(.std.resid)))) + 
-  geom_point_interactive(aes(tooltip = NAME, data_id = GEOID),alpha=.15) +
+  geom_point_interactive(aes(tooltip = rowname, data_id = rowname),alpha=.15) +
   # geom_point(alpha=.5) +
   geom_smooth(se=F)
 
 
 girafe(ggobj = plot_grid(p1,p2))
 tictoc::toc()
-rm(p1, p2)
+rm(p1, p2, mt_fit, mt_fit_df)
 ```
 

@@ -52,6 +52,19 @@ US_counties <- tigris::counties(state = c(state.abb, "DC"), cb=T) %>%
   filter(STATEFP!="02", STATEFP!="15")
 ```
 
+## RUCC
+
+From the website:
+
+The [2013 Rural-Urban Continuum Codes](https://www.ers.usda.gov/data-products/rural-urban-continuum-codes.aspx) form a classification scheme that distinguishes metropolitan counties by the population size of their metro area, and nonmetropolitan counties by degree of urbanization and adjacency to a metro area. The official Office of Management and Budget (OMB) metro and nonmetro categories have been subdivided into three metro and six nonmetro categories. Each county in the U.S. is assigned one of the 9 codes. **This scheme allows researchers to break county data into finer residential groups, beyond metro and nonmetro, particularly for the analysis of trends in nonmetro areas that are related to population density and metro influence.**
+
+```{r}
+RUCC_2013 <- readxl::read_excel("Data/RUCC_2013.xls")
+```
+
+
+
+
 ## TBI Injury
 
 Using the CDC's WISQARS [database](https://wisqars.cdc.gov:8443/cdcMapFramework/), I downloaded the crude rates per 100,000 Population for each county of fatal TBI injuries (all intents, all mechanisms, all ages, all race/ethnicity, both sexes) from 2008-2014. It's based on the 2000 standard population (all races, both sexes). Data was downloaded on 1/17/2020
