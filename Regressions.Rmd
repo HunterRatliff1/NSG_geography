@@ -387,6 +387,35 @@ broom::augment(fit5, df_sans_outliers) %>%
 
 For what it's worth, the crazy outlier in the _residual vs leverage_ is Washington DC, which makes sense as it's the only "county" in that "state".
 
+## Model 6: Adding RUCC
+
+Using [Rural-Urban Continuum Codes](https://www.ers.usda.gov/data-products/rural-urban-continuum-codes.aspx), simplified into metro, nonmetro, and rural. Not a massive increase in the adjusted R2 compared to model 3
+
+```{r def-fit6, echo=T}
+fit6 <- update(fit3, .~. + Urbanization)
+```
+
+
+
+```{r}
+fit6 %>% summary() %>% pander()
+```
+
+
+```{r fig.height=8}
+dx_plots(fit6, df_sans_outliers, plots = "All", use_plotly=F)
+```
+
+```{r}
+broom::augment(fit6, df_sans_outliers) %>%
+  mutate(NAME = str_glue("{NAME}, {ST}")) %>%
+  select(-ST, -Over75, -Deaths, -AgeAdj) %>%
+  arrange(desc(.cooksd)) %>%
+  mutate_if(is.numeric, round, 2) %>%
+  select(GEOID, NAME, .cooksd, everything()) %>%
+  top_n(10, wt=.cooksd) 
+```
+
 
 # Experimental
 
