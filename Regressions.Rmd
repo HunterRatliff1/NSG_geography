@@ -99,6 +99,21 @@ df_full <- read_csv("https://raw.githubusercontent.com/HunterRatliff1/NSG_geogra
                                   RUCC_2013 > 7 ~ "Rural",
                                   T             ~ "Nonmetro"))
 
+df_full_sens <- read_csv("Data/mergedToTBI_v3.csv") %>%
+  select(-npi, -providerCity, -providerST) %>%
+  select(GEOID:Crude, dist_cent_sens, dist_min_sens) %>%
+  filter(!is.na(Deaths)) %>% # drop counties with missing rates
+  filter(GEOID != "46102") %>% # GEOID didn't match to ACS data
+  left_join(ST_regions) %>%
+  mutate(region   = factor(region),
+         division = factor(division)) %>%
+  mutate(region   = forcats::fct_relevel(region, "NORTHEAST"),
+         division = forcats::fct_relevel(division, "New England")) %>%
+  left_join(RUCC_2013) %>%
+  mutate(Urbanization = case_when(RUCC_2013 < 4 ~ "Metro",
+                                  RUCC_2013 > 7 ~ "Rural",
+                                  T             ~ "Nonmetro")) 
+
 glimpse(df_full)
 ```
 
@@ -283,7 +298,7 @@ broom::augment(fit2, df_full) %>%
 
 
 ```{r def-fit3, echo=T}
-df_sans_outliers <- df_full %>%
+df_sans_outliers <- df_full_sens %>%
   filter(!GEOID %in% outliers) 
 fit3 <- lm(Crude ~ dist_cent + log(pop12) + male + Over65, data=df_sans_outliers)
 ```
