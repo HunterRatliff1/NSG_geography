@@ -406,6 +406,11 @@ geo_google <- read_csv("Google_results/geo_google_raw.csv")
 provs <- geo_google %>%
   filter(geoState!="hi", geoState!="ak") %>%
   st_as_sf(coords = c("lon", "lat"), crs=4269)
+
+# Sensitivity analysis using the NPI associated address
+provs_sens <- read_csv("Google_results/geo_npi_byAddress.csv") %>%
+  filter(geoState!="hi", geoState!="ak") %>%
+  st_as_sf(coords = c("lon", "lat"), crs=4269)
 ```
 
 
@@ -630,21 +635,36 @@ dist_cent <- find_closest(US_counties, provs, centroid = T) %>%
 dist_min  <- find_closest(US_counties, provs, centroid = F) %>%
   select(GEOID, NAME, npi:providerST, dist_min=Distance)
 
+## Sensitivity analysis using NPI addresses
+dist_cent_sens <- find_closest(US_counties, provs_sens, centroid = T) %>%
+  st_drop_geometry() %>%
+  select(GEOID, dist_cent_sens=Distance) 
+dist_min_sens  <- find_closest(US_counties, provs_sens, centroid = F) %>%
+  st_drop_geometry() %>%
+  select(GEOID, dist_min_sens=Distance) 
+
 # Join them together
 dist <- inner_join( 
   st_drop_geometry(dist_cent),
   st_drop_geometry(dist_min)
-)
+) 
 
-dist %>% write_csv("Data/Distances_by-names.csv")
 glimpse(dist)
+dist %>% write_csv("Data/Distances_by-names.csv")
 
-rm(dist_cent, dist_min)
+
+dist %>% 
+  inner_join(dist_min_sens) %>% 
+  inner_join(dist_cent_sens) %>%
+  write_csv("Data/Distances_by-names-sens.csv")
+
+rm(dist_cent, dist_min, dist_cent_sens, dist_min_sens)
 ```
 
 ```{r readDistances, echo=F}
 dist <- read_csv("Data/Distances_by-names.csv")
 glimpse(dist)
+dist_sens <- read_csv("Data/Distances_by-names-sens.csv")
 ```
 
 # Joining it all together
@@ -774,8 +794,12 @@ Now we'll merge that with the TBI data. This will be saved as `mergedToTBI_v2.cs
 ##         This might break old versions of code that used the variable pop17,
 ##         Now use the varaible pop12
 
+##
+## Update: 2020-03-16 (v3)
+##         Adding sensitivity analysis columns
 
-mergedToTBI <- dist %>%
+
+mergedToTBI <- dist_sens %>%
   # Join to 2017 acs estimates
   left_join(population) %>%
    # Join to TBI data
@@ -783,7 +807,8 @@ mergedToTBI <- dist %>%
   # Rename colums
   select(GEOID, NAME, ST, dist_cent, dist_min, npi:providerST,  
          pop12, male, Over65, Over75,
-         Deaths, AgeAdj=AgeAdj_Rate, Crude=Crude_Rate, StdPop=Population) %>%
+         Deaths, AgeAdj=AgeAdj_Rate, Crude=Crude_Rate, StdPop=Population, 
+         dist_cent_sens, dist_min_sens) %>%
   mutate(DataSource="Geocoded NPI names")
 
 
@@ -795,7 +820,7 @@ nProvs <- provs %>%
 
 mergedToTBI %>%
   left_join(nProvs) %>%
-  write_csv("Data/mergedToTBI_v2.csv") # Write to csv
+  write_csv("Data/mergedToTBI_v3.csv") # Write to csv
   
 
 
