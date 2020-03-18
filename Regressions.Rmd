@@ -78,7 +78,6 @@ RUCC_2013 <- readxl::read_excel("Data/RUCC_2013.xls") %>%
 df_full <- read_csv("Data/mergedToTBI_v3.csv") %>%
   select(-npi, -providerCity, -providerST) %>%
   select(GEOID:dist_min_sens) %>%
-  filter(!is.na(Deaths)) %>% # drop counties with missing rates
   filter(GEOID != "46102") %>% # GEOID didn't match to ACS data
   
   # Join to datasets
