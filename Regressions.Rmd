@@ -66,15 +66,24 @@ ST_regions <- maps::state.fips %>%
 
 ## Read in the data
 
-Reading in `Data/mergedToTBI_v2.csv`, and dropping any varaibles with NA's. I'm also linking in the census regions and divisions (more on this below) to attempt to account for some of the geographical variance^[I don't have much experience with modeling geographic data, so perhaps advice from Dr Prochaska would be warranted] (see the last section of this report).
+Reading in `Data/mergedToTBI_v3.csv`, and dropping any varaibles with NA's. I'm also linking in the census regions and divisions (more on this below) to attempt to account for some of the geographical variance^[I don't have much experience with modeling geographic data, so perhaps advice from Dr Prochaska would be warranted] (see the last section of this report). Finally, join to RUCC
 
 ```{r readData, eval=FALSE}
-df_full <- read_csv("Data/mergedToTBI_v2.csv") %>%
+RUCC_2013 <- readxl::read_excel("Data/RUCC_2013.xls") %>%
+  select(GEOID=FIPS, RUCC_2013) %>%
+  mutate(Urbanization = case_when(RUCC_2013 < 4 ~ "Metro",
+                                  RUCC_2013 > 7 ~ "Rural",
+                                  T             ~ "Nonmetro")) 
+
+df_full <- read_csv("Data/mergedToTBI_v3.csv") %>%
   select(-npi, -providerCity, -providerST) %>%
-  select(GEOID:Crude) %>%
+  select(GEOID:dist_min_sens) %>%
   filter(!is.na(Deaths)) %>% # drop counties with missing rates
   filter(GEOID != "46102") %>% # GEOID didn't match to ACS data
-  left_join(ST_regions)
+  
+  # Join to datasets
+  left_join(ST_regions) %>%
+  left_join(RUCC_2013)
 
 # # Missing data
 # is.na(df_full) %>% colSums()
@@ -85,34 +94,18 @@ df_full %>% write_csv("public_data/regression.csv")
 Glimpse of the data.frame, which is available on github 
 
 ```{r, echo=T}
-RUCC_2013 <- read_csv("https://raw.githubusercontent.com/HunterRatliff1/NSG_geography/master/public_data/RUCC_2013.csv") %>%
-  select(GEOID=FIPS, RUCC_2013, Description)
+# RUCC_2013 <- read_csv("https://raw.githubusercontent.com/HunterRatliff1/NSG_geography/master/public_data/RUCC_2013.csv") %>%
+  # select(GEOID=FIPS, RUCC_2013, Description)
 
 ### Run this line to get the data
 df_full <- read_csv("https://raw.githubusercontent.com/HunterRatliff1/NSG_geography/master/public_data/regression.csv") %>%
   mutate(region   = factor(region),
          division = factor(division)) %>%
-  mutate(region   = forcats::fct_relevel(region, "NORTHEAST"),
-         division = forcats::fct_relevel(division, "New England")) %>%
-  left_join(RUCC_2013) %>%
-  mutate(Urbanization = case_when(RUCC_2013 < 4 ~ "Metro",
-                                  RUCC_2013 > 7 ~ "Rural",
-                                  T             ~ "Nonmetro"))
-
-df_full_sens <- read_csv("Data/mergedToTBI_v3.csv") %>%
-  select(-npi, -providerCity, -providerST) %>%
-  select(GEOID:Crude, dist_cent_sens, dist_min_sens) %>%
-  filter(!is.na(Deaths)) %>% # drop counties with missing rates
-  filter(GEOID != "46102") %>% # GEOID didn't match to ACS data
-  left_join(ST_regions) %>%
-  mutate(region   = factor(region),
-         division = factor(division)) %>%
-  mutate(region   = forcats::fct_relevel(region, "NORTHEAST"),
-         division = forcats::fct_relevel(division, "New England")) %>%
-  left_join(RUCC_2013) %>%
-  mutate(Urbanization = case_when(RUCC_2013 < 4 ~ "Metro",
-                                  RUCC_2013 > 7 ~ "Rural",
-                                  T             ~ "Nonmetro")) 
+  mutate(region       = forcats::fct_relevel(region, "NORTHEAST"),
+         division     = forcats::fct_relevel(division, "New England"),
+         Urbanization = forcats::fct_relevel(Urbanization, "Metro")) %>%
+  filter(!is.na(Deaths)) # drop counties with missing rates
+  
 
 glimpse(df_full)
 ```
