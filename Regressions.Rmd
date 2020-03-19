@@ -101,7 +101,7 @@ df_full <- read_csv("Data/mergedToTBI_v3.csv") %>%
   # Join to datasets
   left_join(ST_regions) %>%
   left_join(RUCC_2013) %>%
-  inner_join(df_full)
+  inner_join(num_provs)
 
 # # Missing data
 # is.na(df_full) %>% colSums()
