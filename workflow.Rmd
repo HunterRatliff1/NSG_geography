@@ -776,7 +776,9 @@ population <- select(prop_male, GEOID, NAME, summary_est:male_moe) %>%
   left_join(select(prop_over75, GEOID:summary_moe, Over75, Over75_moe)) %>%
   rename(pop12=summary_est, pop12_moe=summary_moe) %>%
   select(-NAME) %>%
-  select(-pop12_moe, -male_moe, -Over65_moe, -Over75_moe) # drop margins of error
+  select(-pop12_moe, -male_moe, -Over65_moe, -Over75_moe) %>% # drop margins of error
+  
+  mutate(GEOID = recode(GEOID, "46113"="46102"))
 ```
 
 
