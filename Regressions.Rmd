@@ -69,12 +69,30 @@ ST_regions <- maps::state.fips %>%
 Reading in `Data/mergedToTBI_v3.csv`, and dropping any varaibles with NA's. I'm also linking in the census regions and divisions (more on this below) to attempt to account for some of the geographical variance^[I don't have much experience with modeling geographic data, so perhaps advice from Dr Prochaska would be warranted] (see the last section of this report). Finally, join to RUCC
 
 ```{r readData, eval=FALSE}
+## Provider file
+provs <- read_csv("Google_results/geo_npi_byAddress.csv") %>%
+  filter(geoState!="hi", geoState!="ak") %>%
+  st_as_sf(coords = c("lon", "lat"), crs=4269)
+
+
+
+## get number of providers in each county
+num_provs <- tibble(
+  GEOID     = US_counties$GEOID,
+  num_provs = colSums(st_within(provs, US_counties, sparse = F))
+)
+
+
+
+## RUCC codes
 RUCC_2013 <- readxl::read_excel("Data/RUCC_2013.xls") %>%
   select(GEOID=FIPS, RUCC_2013) %>%
   mutate(Urbanization = case_when(RUCC_2013 < 4 ~ "Metro",
                                   RUCC_2013 > 7 ~ "Rural",
                                   T             ~ "Nonmetro")) 
 
+
+## make df to be sent to Github
 df_full <- read_csv("Data/mergedToTBI_v3.csv") %>%
   select(-npi, -providerCity, -providerST) %>%
   select(GEOID:dist_min_sens) %>%
@@ -82,7 +100,8 @@ df_full <- read_csv("Data/mergedToTBI_v3.csv") %>%
   
   # Join to datasets
   left_join(ST_regions) %>%
-  left_join(RUCC_2013)
+  left_join(RUCC_2013) %>%
+  inner_join(df_full)
 
 # # Missing data
 # is.na(df_full) %>% colSums()
