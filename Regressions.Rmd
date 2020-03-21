@@ -87,6 +87,7 @@ num_provs <- tibble(
 ## RUCC codes
 RUCC_2013 <- readxl::read_excel("Data/RUCC_2013.xls") %>%
   select(GEOID=FIPS, RUCC_2013) %>%
+  mutate(GEOID = recode(GEOID, "46113"="46102")) %>%
   mutate(Urbanization = case_when(RUCC_2013 < 4 ~ "Metro",
                                   RUCC_2013 > 7 ~ "Rural",
                                   T             ~ "Nonmetro")) 
