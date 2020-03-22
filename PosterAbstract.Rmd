@@ -1,0 +1,520 @@
+---
+title: "Poster / Abstract"
+author: "Hunter Ratliff"
+date: "2/13/2020"
+output:
+  html_document:
+    code_folding: hide
+    df_print: paged
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=F, warning=F, message=F)
+library(magrittr)
+library(scales)
+library(RColorBrewer)
+library(ggthemes)
+library(cowplot)
+library(sf)       # newer, better version of sp
+library(tigris)   # for shapefiles
+library(sjPlot);  # for lm plots
+library(qwraps2)  # gives nice wrapper to calculate mean/CI with inline R code
+library(texreg)   # Pretty regression tables
+library(tidyverse)
+
+# settings for tigris
+options(tigris_class = "sf")
+options(tigris_use_cache = T) 
+
+
+
+# get shapefiles for US counties
+US_counties <- tigris::counties(state = c(state.abb, "DC"), cb=T) %>%
+  filter(STATEFP!="02", STATEFP!="15")
+
+
+
+### Run this line to get the data
+df_full <- read_csv("https://raw.githubusercontent.com/HunterRatliff1/NSG_geography/master/public_data/regression.csv") %>%
+  mutate(region   = factor(region),
+         division = factor(division)) %>%
+  mutate(male   = male * 100,
+         Over65 = Over65 *100) %>%
+  # mutate(Urban = case_when(between(RUCC_2013, 1, 3)  ~ "Urban",
+  #                          RUCC_2013 %in% c(4, 6, 8) ~ "Adjacent",
+  #                          RUCC_2013 %in% c(5, 7, 9) ~ "Rural",
+  #                          TRUE                      ~ "error")) %>%
+  
+  mutate(region       = forcats::fct_relevel(region, "NORTHEAST"),
+         division     = forcats::fct_relevel(division, "New England"),
+         Urbanization = forcats::fct_relevel(Urbanization, "Metro"))
+  
+
+
+
+
+df <- df_full %>%
+  ## Outliers
+  filter(!GEOID %in% c("38053","20055","30085","12119","30021")) %>%
+  filter(!is.na(Deaths)) # drop counties with missing rates
+
+
+# functions to print stats inline
+print_mean_ci <- function(x) str_glue("{print(qwraps2::mean_ci(x))}")
+print_mean_sd <- function(x) str_glue("{print(qwraps2::mean_sd(x, na_rm = T))}")
+```
+
+
+
+
+# Resuluts
+
+Univariate descriptive statistics for each variable can be found in **Table 1**. The mean (95% CI) mortality rate among all counties was `r frmtci(mean_ci(df$Crude))` per 100,000 population (**Figure 1**). The mean (95% CI) distance to the nearest neurosurgeon was `r frmtci(mean_ci(df$dist_cent))` miles (**Figure 2**). 
+
+```{r Table_1,results='asis'}
+options(qwraps2_markup = "markdown")
+df_compare_missing <- df_full %>%
+  anti_join(df) %>%
+  mutate(Exclude = T) %>%
+  bind_rows(df) %>%
+  mutate(Exclude = replace_na(Exclude, F)) %>%
+  group_by(Exclude) 
+
+tbl1_summary <- list("Distance (miles)" =
+                       list("Mean (95% CI)" = ~ frmtci(qwraps2::mean_ci(.data$dist_cent)),
+                            # "Mean (SD)"     = ~ qwraps2::mean_sd(.data$dist_cent, denote_sd = "paren"),
+                            "Median (IQR)"  = ~ qwraps2::median_iqr(.data$dist_cent)),
+                     "% Male" = 
+                       list("Mean (95% CI)" = ~ frmtci(qwraps2::mean_ci(.data$male)),
+                            # "Mean (SD)"     = ~ qwraps2::mean_sd(.data$male, denote_sd = "paren"),
+                            "Median (IQR)"  = ~ qwraps2::median_iqr(.data$male)),
+                     "% 65 or older" = 
+                       list("Mean (95% CI)" = ~ frmtci(qwraps2::mean_ci(.data$Over65)),
+                            # "Mean (SD)"     = ~ qwraps2::mean_sd(.data$Over65, denote_sd = "paren"),
+                            "Median (IQR)"  = ~ qwraps2::median_iqr(.data$Over65)),
+                     "Urbanization" = 
+                       list("Metro (%)"     = ~ qwraps2::n_perc0(.data$Urbanization == "Metro"),
+                            "Nonmetro (%)"  = ~ qwraps2::n_perc0(.data$Urbanization == "Nonmetro"),
+                            "Rural (%)"     = ~ qwraps2::n_perc0(.data$Urbanization == "Rural")),
+                     "Population" =
+                       list("Mean (95% CI)" = ~ frmtci(qwraps2::mean_ci(.data$StdPop), digits=0),
+                            # "Mean (SD)"     = ~ qwraps2::mean_sd(.data$StdPop, digits=0, denote_sd = "paren"),
+                            "Median (IQR)"  = ~ qwraps2::median_iqr(.data$StdPop, digits=0))
+)
+
+cbind(
+  {df_compare_missing %>% ungroup() %>% summary_table(tbl1_summary)},
+  {df_compare_missing %>% group_by(Exclude)  %>% summary_table(tbl1_summary)}
+) %>% print(rtitle = "Table 1")
+
+## Sup table 1
+# df %>%
+#   mutate(male   = male * 100,
+#          Over65 = Over65 * 100) %>%
+#   select(Crude, AgeAdj, dist_cent, male, Over65, Urbanization, num_provs) %>%
+#   select(-num_provs) %>%
+#   desctable::desctable(stats = list("N"            = length,
+#                                     "Mean +/- SD"  = qwraps2::mean_sd,
+#                                     "median (IQR)" = qwraps2::median_iqr,
+#                                     "min"          = min,
+#                                     "max"          = max,
+#                                     "%"            = is.factor ~ percent),
+#                        labels = c(Over65    =  "65 years or older (%)",
+#                                   male      = "Male (%)",
+#                                   dist_cent = "Distance (miles)",
+#                                   Crude     = "Crude rate",
+#                                   AgeAdj    = "Age adjusted rate")) %>%
+#   desctable::pander.desctable()
+
+# top_n(df, 1, wt=dist_cent) %>% str_glue_data("{NAME}, {ST} with a distance of {round(dist_cent)} miles") 
+```
+
+
+```{r Fig1, cache=TRUE}
+########################
+##   CACHED RESULTS   ##
+########################
+## Take care not to edit this chunk unless you absolutly must, since it takes a minute to render
+##
+##
+
+Fig_rates <- US_counties %>%
+  # filter(STATEFP=="48") %>%
+  geo_join(df, by="GEOID") %>%
+  ggplot() +
+  geom_sf(aes(fill=Crude), color=NA) + 
+  coord_sf(crs = 4269) +
+  scale_fill_distiller(palette="RdYlGn", guide = 'legend',
+                       na.value = "grey50",
+                       breaks = c(10,20,40,60),
+                       values=scales::rescale(quantile(df$Crude)),
+                       name="TBI Mortality Rate\n(per 100,000)", direction=-1) +
+  # theme_dark()
+  ggthemes::theme_map() +
+  theme(legend.direction="horizontal") +
+  labs(title = "[Fig 1] TBI Mortality Rates")
+
+Fig_rates
+```
+
+```{r Fig2, cache=TRUE}
+########################
+##   CACHED RESULTS   ##
+########################
+## Take care not to edit this chunk unless you absolutly must, since it takes a minute to render
+##
+##
+
+Fig_dist <- US_counties %>%
+  select(-NAME) %>%
+  # filter(STATEFP=="48") %>%
+  geo_join(df_full, by="GEOID") %>%
+  ggplot() +
+  geom_sf(aes(fill=dist_cent), color=NA) + 
+  coord_sf(crs = 4269) +
+  scale_fill_distiller(palette="Blues", guide = 'legend',
+                       na.value = "grey50",
+                       trans="sqrt",
+                       # values=scales::rescale(quantile(df$dist_cent)),
+                       name="Distance (miles)", direction=1) +
+  # theme_dark()
+  ggthemes::theme_map() +
+  theme(legend.direction="horizontal") +
+  labs(title = "[Fig 2] Distance to nearest neurosurgeon")
+
+Fig_dist
+```
+
+
+
+We geolocated `r nrow(count(read_csv("Google_results/geo_google_raw.csv"), npi))` neurosurgeons 
+
+## Missing TBI Rates
+
+
+
+Among the `r nrow(df_full)` counties in the continental US, `r nrow(df_full)-nrow(df)` did not have TBI mortality rates reported because they had 20 or fewer TBI deaths. When compared with counties included in our analysis, the counties with missing TBI mortality rates tended to have a greater proportion of their population who were male (50.8% vs 49.7%; p < 0.001) or 65 years or older (18.8% vs 15.2%; p < 0.001), tended to be farther from the nearest neurosurgeon (60.0 vs 30.4 miles; p < 0.001), and to be less urban (**TABLE 1**). 
+
+Counties with missing rates also tended to have smaller populations (mean $\pm$ SD: `r print_mean_sd(subset(df_compare_missing, Exclude)$StdPop)`) than counties without missing data (`r print_mean_sd(subset(df_compare_missing, !Exclude)$StdPop)`; p<0.001), and all together counties with missing rates only accounted for 1.67% of the US population. 
+
+```{r, include=F}
+## These are the tests for Table 1
+
+qplot(dist_cent, Exclude, geom="boxplot", data=df_compare_missing)
+qplot(dist_cent, fill=Exclude, geom="density", alpha=.5, data=df_compare_missing)
+t.test(dist_cent ~ Exclude, data=df_compare_missing)
+
+qplot(StdPop, fill=Exclude, geom="density", alpha=.5, data=df_compare_missing) + scale_x_log10()
+wilcox.test(StdPop ~ Exclude, data=df_compare_missing)
+
+mosaicplot(Urbanization~Exclude, data=df_compare_missing)
+chisq.test(df_compare_missing$Urbanization, df_compare_missing$Exclude)
+
+qplot(male, Exclude, geom="boxplot", data=df_compare_missing)
+qplot(male, fill=Exclude, geom="density", alpha=.5, data=df_compare_missing)
+t.test(male ~ Exclude, data=df_compare_missing)
+
+qplot(Over65, Exclude, geom="boxplot", data=df_compare_missing)
+qplot(Over65, fill=Exclude, geom="density", alpha=.5, data=df_compare_missing)
+t.test(Over65 ~ Exclude, data=df_compare_missing)
+
+## How much of the population is missing?
+df_full %>%
+  mutate(missing = ifelse(is.na(Deaths), "Missing", "No")) %>%
+  group_by(missing) %>%
+  summarise(
+    num = n(),
+    pop = sum(pop12)
+  ) %>%
+  mutate(`% missing`=num/sum(num),
+         `% pop` = pop/sum(pop))
+```
+
+
+
+
+
+
+```{r}
+## These are the hypothetical rates needed in order for the data to show up
+df_full %>%
+  mutate(missing = is.na(Deaths)) %>%
+  filter(missing) %>%
+  group_by(GEOID, NAME, ST) %>%
+  summarise(RateNeeded = 100000*20/StdPop) %>%
+  summary()
+```
+
+# Mortality Rates (bi + multi-variate)
+
+Crude mortality rates were the lowest in metropolitan counties (`r nrow(subset(df, Urbanization=="Metro"))` counties; mean +/- SD rate: `r print_mean_sd(subset(df, Urbanization=="Metro")$Crude)`), followed by non-metropolitan counties (`r nrow(subset(df, Urbanization=="Nonmetro"))` counties; `r print_mean_sd(subset(df, Urbanization=="Nonmetro")$Crude)`), with rural counties having the highest rate (`r nrow(subset(df, Urbanization=="Rural"))` counties; `r print_mean_sd(subset(df, Urbanization=="Rural")$Crude)`); p < 0.001. 
+
+```{r, include=F}
+urban_anova <- aov(Crude~Urbanization, data=df)
+car::Anova(urban_anova, type="III")
+
+# homogeneity of variance :(
+bartlett.test(Crude~Urbanization, data=df)
+car::leveneTest(Crude~Urbanization, data=df)
+
+
+           
+oneway.test(Crude~Urbanization, data=df,
+            var.equal=FALSE)
+```
+
+
+
+
+
+```{r, results = 'asis', echo = FALSE}
+base_fit  <- lm(Crude  ~ dist_cent + male + Over65 + Urbanization, data=df)
+
+htmlreg(ci.force=T, doctype=F, list(
+  lm(Crude~dist_cent, data=df),
+  lm(Crude~male, data=df),
+  lm(Crude~Over65, data=df),
+  lm(Crude~Urbanization, data=df),
+ base_fit
+))
+
+htmlreg(doctype=F, list(
+  lm(Crude~dist_cent, data=df),
+  lm(Crude~male, data=df),
+  lm(Crude~Over65, data=df),
+  lm(Crude~Urbanization, data=df),
+ base_fit
+))
+
+```
+
+```{r, results = 'asis', eval = FALSE}
+base_fit 
+
+tibble(dist_cent = c(0,0),
+       male      = c(.0, .0),
+       Over65    = c(.0,.01),
+       Urbanization = c("Metro", "Metro")
+) %>%
+  predict(base_fit, newdata = .)
+
+3.183063 - 2.531114
+
+df %>% mutate(dist_cent = dist_cent/10) %>%
+  lm(Crude~dist_cent, data=.) %>%
+  screenreg(ci.force=T)
+```
+
+
+
+
+
+
+# Sensitivity
+
+Sens1 uses the minimum distance, but is zero inflated. Sens 2 limits the analysis to only counties without NSG
+
+```{r, results = 'asis', echo = FALSE}
+htmlreg(ci.force=T, doctype=F, 
+        custom.model.names=c("Base", "Age Adjusted", "Sens 1", "Sens 2"),
+        list(
+          base_fit,
+          update(base_fit, AgeAdj~.),
+          update(base_fit, .~. + dist_min - dist_cent),
+          update(base_fit, .~. + dist_min - dist_cent, subset = dist_min!=0)
+))
+
+htmlreg(doctype=F, 
+        custom.model.names=c("Base", "Age Adjusted", "Sens 1", "Sens 2"),
+        list(
+          base_fit,
+          update(base_fit, AgeAdj~.),
+          update(base_fit, .~. + dist_min - dist_cent),
+          update(base_fit, .~. + dist_min - dist_cent, subset = dist_min!=0)
+))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r, eval=F}
+
+summary(fit)
+car::Anova(fit,type="III")
+
+bind_cols(
+  tidy(fit),
+  broom::confint_tidy(fit)
+)[2,]
+
+
+
+## Who has provider?
+df_full %>% mutate(hasProv = ifelse(dist_min==0, T,F)) %>% count(hasProv) %>% mutate(`%`=n/sum(n))
+
+df_full %>% ggplot(aes(x=Urbanization, y=dist_cent)) + geom_violin()
+
+
+## compare groups
+df_full %>% mutate(hasProv = ifelse(dist_min==0, "Yes","No")) %>%
+  t.test(Over65~hasProv, data=.)
+
+df_full %>% mutate(hasProv = ifelse(dist_min==0, "Yes","No")) %>%
+  t.test(male~hasProv, data=.)
+
+df_full %>% mutate(hasProv = ifelse(dist_min==0, "Yes","No")) %>%
+  xtabs(~hasProv+Urbanization, data=.)  %T>%
+  print() %>% 
+  fisher.test()
+
+
+df_full %>% mutate(hasProv = ifelse(dist_min==0, "Yes","No")) %>%
+  t.test(Crude~hasProv, data=.)
+
+
+
+df_full %>% mutate(hasProv = ifelse(dist_min==0, "Yes","No")) %>%
+  xtabs(~hasProv+region, data=.)  %T>%
+  print() %>% 
+  fisher.test()
+  # chisq.test()
+```
+
+
+
+
+
+
+```{r}
+# fit
+fit_slr   <- lm(Crude  ~ dist_cent, data=df) 
+
+base_fit %>% summary()
+
+# Age-adjusted
+update(base_fit, AgeAdj~.) %>% summary()
+
+# Using min distance instead of center
+update(base_fit, .~. + dist_min - dist_cent) %>% summary()
+update(base_fit, .~. + dist_min - dist_cent, subset = dist_min!=0) %>% summary()
+
+fit       <- lm(Crude  ~ dist_cent + log(pop12) + male + Over65 + Urbanization, data=df)
+fit_min   <- lm(Crude  ~ dist_min + log(pop12) + male + Over65 + Urbanization, data=df)
+fit_age   <- lm(AgeAdj ~ dist_cent + log(pop12) + male + Over65 + Urbanization, data=df)
+fit_sens  <- lm(Crude  ~ dist_cent_sens + log(pop12) + male + Over65 + Urbanization, data=df)
+
+fit_subset <- lm(Crude  ~ dist_min + log(pop12) + male + Over65 + Urbanization, data=df,
+                 subset = dist_min!=0) 
+summary(fit)
+summary(fit_subset)
+
+
+
+```
+
+
+
+```{r OldTable2, results='asis', eval=F, include=F}
+options(qwraps2_markup = "markdown")
+df_compare_missing <- df_full %>%
+  anti_join(df) %>%
+  mutate(Exclude = T) %>%
+  bind_rows(df) %>%
+  mutate(Exclude = replace_na(Exclude, F)) %>%
+  group_by(Exclude) 
+
+df_compare_missing %>%
+  group_by(Exclude) %>%
+  
+summary_table(
+  list("Distance (miles)" =
+         list("Mean (SD)"    = ~ qwraps2::mean_sd(.data$dist_cent, denote_sd = "paren"),
+              "Median (IQR)" = ~ qwraps2::median_iqr(.data$dist_cent)),
+       "Population" =
+              list("Mean (SD)"    = ~ qwraps2::mean_sd(.data$StdPop, digits=0, denote_sd = "paren"),
+                   "Median (IQR)" = ~ qwraps2::median_iqr(.data$StdPop, digits=0)),
+       "Urbanization" = 
+         list("Metro"     = ~ qwraps2::n_perc0(.data$Urbanization == "Metro"),
+              "Nonmetro"  = ~ qwraps2::n_perc0(.data$Urbanization == "Nonmetro"),
+              "Rural"     = ~ qwraps2::n_perc0(.data$Urbanization == "Rural")),
+       "% Male" = 
+         list("Mean (SD)" = ~ qwraps2::mean_sd(.data$male*100, denote_sd = "paren")),
+       "% 65 or older" = 
+         list("Mean (SD)" = ~ qwraps2::mean_sd(.data$Over65*100, denote_sd = "paren"))
+   )
+)
+```
+
+
+
+```{r nsg_bin, include=F}
+nsg_bin <- df %>%
+  mutate(bins = cut(num_provs, 
+                    breaks = c(0,1,6,11, 200),
+                    labels = c("0", "1-5", "6-10", ">10"),
+                    right=F)) %>%
+  group_by(bins) %>%
+  summarise(n = n(),
+            mean_sd = mean_sd(Crude)) %>%
+  rename(NSG_in_county=bins)
+
+nsg_bin_anova <- df %>%
+  mutate(bins = cut(num_provs, 
+                    breaks = c(0,1,6,11, 200),
+                    labels = c("0", "1-5", "6-10", ">10"),
+                    right=F)) %>%
+  aov(Crude~bins, data=.)
+
+car::Anova(nsg_bin_anova, type="III")
+```
+
+
+Mortality rates also varied by the number of neurosurgeons in the county (**Table 2**), with counties lacking any neurosurgeons having a mean rate $\pm$ SD of `r nsg_bin$mean_sd[1]`, counties with `r nsg_bin$NSG_in_county[2]` neurosurgeons having a rate of `r nsg_bin$mean_sd[2]`, counties with `r nsg_bin$NSG_in_county[3]` neurosurgeons having a rate of `r nsg_bin$mean_sd[3]`, and counties with `r nsg_bin$NSG_in_county[4]` neurosurgeons having a rate of `r nsg_bin$mean_sd[4]` (p < 0.001).
+
+TABLE 4
+
+```{r Table4}
+ tb2a <- df %>%
+    group_by(Urbanization) %>%
+  summarise(n = n(),
+            Crude = str_glue("{round(mean_ci(Crude, na_rm = T),2)[1]} ({round(mean_ci(Crude, na_rm = T),2)[2]}, {round(mean_ci(Crude, na_rm = T),2)[3]})"),
+            AgeAdj = str_glue("{round(mean_ci(AgeAdj, na_rm = T),2)[1]} ({round(mean_ci(AgeAdj, na_rm = T),2)[2]}, {round(mean_ci(AgeAdj, na_rm = T),2)[3]})")) %>%
+  mutate(category = "Urbanization") %>%
+  select(category, level=Urbanization, n, Crude, AgeAdj)
+
+tb2b <- df %>%
+    mutate(bins = cut(num_provs, 
+                    breaks = c(0,1,6,11, 200),
+                    labels = c("0", "1-5", "6-10", ">10"),
+                    right=F)) %>%
+  group_by(bins) %>%
+  summarise(n = n(),
+            Crude = str_glue("{round(mean_ci(Crude, na_rm = T),2)[1]} ({round(mean_ci(Crude, na_rm = T),2)[2]}, {round(mean_ci(Crude, na_rm = T),2)[3]})"),
+            AgeAdj = str_glue("{round(mean_ci(AgeAdj, na_rm = T),2)[1]} ({round(mean_ci(AgeAdj, na_rm = T),2)[2]}, {round(mean_ci(AgeAdj, na_rm = T),2)[3]})")) %>%
+  mutate(category = "NSG_in_county") %>%
+  select(category, level=bins, n, Crude, AgeAdj)
+
+bind_rows(tb2a, tb2b)
+rm(rate_overall, rate_urban, nsg_bin, tb2a, tb2b)
+```
+
+
