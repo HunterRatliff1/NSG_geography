@@ -44,10 +44,6 @@ df_full <- read_csv("https://raw.githubusercontent.com/HunterRatliff1/NSG_geogra
          division = factor(division)) %>%
   mutate(male   = male * 100,
          Over65 = Over65 *100) %>%
-  # mutate(Urban = case_when(between(RUCC_2013, 1, 3)  ~ "Urban",
-  #                          RUCC_2013 %in% c(4, 6, 8) ~ "Adjacent",
-  #                          RUCC_2013 %in% c(5, 7, 9) ~ "Rural",
-  #                          TRUE                      ~ "error")) %>%
   
   mutate(region       = forcats::fct_relevel(region, "NORTHEAST"),
          division     = forcats::fct_relevel(division, "New England"),
@@ -71,7 +67,7 @@ print_mean_sd <- function(x) str_glue("{print(qwraps2::mean_sd(x, na_rm = T))}")
 
 
 
-# Resuluts
+# Results
 
 Univariate descriptive statistics for each variable can be found in **Table 1**. The mean (95% CI) mortality rate among all counties was `r frmtci(mean_ci(df$Crude))` per 100,000 population (**Figure 1**). The mean (95% CI) distance to the nearest neurosurgeon was `r frmtci(mean_ci(df$dist_cent))` miles (**Figure 2**). 
 
@@ -404,32 +400,7 @@ df_full %>% mutate(hasProv = ifelse(dist_min==0, "Yes","No")) %>%
 
 
 
-```{r}
-# fit
-fit_slr   <- lm(Crude  ~ dist_cent, data=df) 
 
-base_fit %>% summary()
-
-# Age-adjusted
-update(base_fit, AgeAdj~.) %>% summary()
-
-# Using min distance instead of center
-update(base_fit, .~. + dist_min - dist_cent) %>% summary()
-update(base_fit, .~. + dist_min - dist_cent, subset = dist_min!=0) %>% summary()
-
-fit       <- lm(Crude  ~ dist_cent + log(pop12) + male + Over65 + Urbanization, data=df)
-fit_min   <- lm(Crude  ~ dist_min + log(pop12) + male + Over65 + Urbanization, data=df)
-fit_age   <- lm(AgeAdj ~ dist_cent + log(pop12) + male + Over65 + Urbanization, data=df)
-fit_sens  <- lm(Crude  ~ dist_cent_sens + log(pop12) + male + Over65 + Urbanization, data=df)
-
-fit_subset <- lm(Crude  ~ dist_min + log(pop12) + male + Over65 + Urbanization, data=df,
-                 subset = dist_min!=0) 
-summary(fit)
-summary(fit_subset)
-
-
-
-```
 
 
 
@@ -516,5 +487,32 @@ tb2b <- df %>%
 bind_rows(tb2a, tb2b)
 rm(rate_overall, rate_urban, nsg_bin, tb2a, tb2b)
 ```
+
+```{r}
+rate_needed <- df_full %>%
+  # anti_join(df) %>%
+  filter(is.na(Deaths)) %>%
+  mutate(RateNeeded = 100000*20/StdPop) 
+
+
+rate_needed$pred_rate <- predict(base_fit, rate_needed)
+
+rate_needed %>%
+  mutate(pred_deaths = pred_rate*StdPop/100000) %>%
+  mutate(OverPredict = pred_deaths > 20) %>%
+  count(OverPredict)
+
+  ggplot(aes(x=pred_deaths)) +
+  geom_density()
+
+
+rate_needed %>%
+  # count(OverEstimate)
+  ggplot(aes(x=pred_rate, y=RateNeeded)) + 
+  geom_jitter()
+
+
+```
+
 
 
