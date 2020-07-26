@@ -1,0 +1,627 @@
+---
+title: "Reviewer comments"
+author: "Hunter Ratliff, htratlif@utmb.edu"
+date: "7/17/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(magrittr)
+library(sf)        # better version of sp, for plotting geography
+library(tigris)    # for getting shapefiles
+library(tidygeocoder)
+# library(ggmap)
+
+library(RColorBrewer)
+library(ggthemes)
+library(scales)
+library(sjPlot);  # for lm plots
+library(cowplot)   # plotting multiple ggplots in one
+
+library(broom)     # to augment models
+library(pander)    # for pretty outputs
+library(qwraps2)  # gives nice wrapper to calculate mean/CI with inline R code
+library(texreg)   # Pretty regression tables
+library(tidyverse)
+
+
+# settings for tigris
+options(tigris_class = "sf")
+options(tigris_use_cache = T) 
+```
+
+# Population-Weighted Centroid
+
+Thanks to this [reddit post](https://www.reddit.com/r/dataisbeautiful/comments/djz9wv/inspired_by_that_other_population_map_post_us/f49cz03?utm_source=share&utm_medium=web2x)
+
+Same issues with [GEOID changes](https://www.census.gov/programs-surveys/geography/technical-documentation/county-changes.html)
+
+We used population-weighted centroids of counties
+
+[Census methods](https://www2.census.gov/geo/pdfs/reference/cenpop2010/COP2010_documentation.pdf)
+
+```{r, eval=F}
+US_counties <- tigris::counties(state = c(state.abb, "DC"), cb=T, resolution = "5m") %>%
+  filter(STATEFP!="02", STATEFP!="15") %>%
+  select(GEOID)
+
+read_csv("https://www2.census.gov/geo/docs/reference/cenpop2010/county/CenPop2010_Mean_CO.txt") %>%
+  mutate(GEOID = paste0(STATEFP, COUNTYFP)) %>%
+  filter(GEOID!="51515") %>%
+  mutate(GEOID = recode(GEOID, 
+                        "46113"="46102",
+                        "51515"="51019")) %>%
+  # filter(GEOID %in% c("51515", "51019"))
+  # filter(GEOID=="51019")
+  semi_join(st_drop_geometry(US_counties)) %>%
+  select(GEOID, lat_county=LATITUDE, lon_county=LONGITUDE) %>%
+  write_csv("Data/COUNTY_population_weighted_centroid.csv")
+
+
+rm(US_counties)
+```
+
+
+
+
+# Distances w/ Trauma
+
+We identified locations of trauma centers using the 2017 [Provider of Services Current File](https://www.cms.gov/Research-Statistics-Data-and-Systems/Downloadable-Public-Use-Files/Provider-of-Services/POS2017) from CMS. This file contains details about all facilities participating in Medicare, including the facility type (e.g. Hospital, Skilled Nursing Facility) and services provided at the facility (e.g. designated trauma center services, intensive care services). We limited our analysis to hospitals that provided...
+
+
+## Geocoding methodology
+
+First, I tried to geocode using the census geocoder. For results that didn't match the census API (n=2714), I then used [geocod.io](https://www.geocod.io/) to attempt geocoding again. Geocod.io offers [accuracy scores](https://www.geocod.io/guides/accuracy-types-scores/), so I selected scores below `0.5` and results that returned no match (only 19). With this narrow subset of results (n=346), I used Google's API to search for the hospital name, biasing it to the city and zipcode (e.g. {hospital name} near {city}, {state} {zipcode})
+
+```{r, eval=F}
+# get shapefiles for US counties
+US_counties <- tigris::counties(state = c(state.abb, "DC"), cb=T) %>%
+  filter(STATEFP!="02", STATEFP!="15")
+
+
+
+provs <- read_csv("Google_results/geo_npi_byAddress.csv") %>%
+  filter(geoState!="hi", geoState!="ak") %>%
+  st_as_sf(coords = c("lon", "lat"), crs=4269)
+
+pos17 <- data.table::fread("POS_2017/POS_OTHER_DEC17.csv") %>%
+  
+  # Select only hospitals, and those that are short/long/critical access
+  filter(PRVDR_CTGRY_CD=="1", PRVDR_CTGRY_SBTYP_CD %in% c(1,2,11)) %>%
+  mutate(PRVDR_CTGRY_SBTYP_CD = recode(PRVDR_CTGRY_SBTYP_CD, 
+                                       "1"  = "Short term", "2" = "Long term", 
+                                       "11" = "Critical Access")) %>%
+  
+  # Drop cols that are now all NA
+  select(where(function(x) any(!is.na(x))))
+  
+
+
+hosp17 <- pos17 %>%
+  select(HospType=PRVDR_CTGRY_SBTYP_CD, ED=DCTD_ER_SRVC_CD, Trauma=SHCK_TRMA_SRVC_CD, NSG=NRSRGCL_SRVC_CD,
+         FAC_NAME, state=STATE_CD, city=CITY_NAME, PRVDR_NUM, street=ST_ADR, zipcode=ZIP_CD) %>%
+  mutate(ED     = ED > 0,
+         Trauma = Trauma > 0,
+         NSG    = NSG > 0) %>%
+  filter(ED|Trauma)
+```
+
+
+```{r, eval=F}
+with_census <- hosp17 %>%
+  head(n=100) %>%
+  geocode(street = street, state=state, city=city, postalcode=zipcode, 
+          method="census",
+          full_results = TRUE,
+          return_type="geographies", # census only
+          verbose=F)
+
+
+batch_lookup <- function(full_df, results_so_far, n=300, method="census", bell=T){
+  
+  to_lookup <- full_df
+  # Limit to results not yet tried (if provided)
+  if(!missing(results_so_far)) to_lookup <- full_df %>% anti_join(results_so_far)
+  
+  
+  tictoc::tic()
+  result <- to_lookup %>%
+    # Limit to n rows
+    head(n=n) %>%
+    geocode(street = street, state=state, city=city, postalcode=zipcode, 
+          method = method,
+          full_results = TRUE,
+          return_type = ifelse(method=="census", "geographies", "locations"),
+          verbose=F)
+  
+  # sound the bell
+  if(require(beepr) & bell) beepr::beep()
+  tictoc::toc()
+  
+  
+  # Return results together
+  if(missing(results_so_far)) return(result)
+  cli::cli_alert_info("{round((nrow(results_so_far) + n) / nrow(full_df),3)*100}% of records looked up")
+  bind_rows(results_so_far, result)
+  
+}
+
+###########################
+###   CENSUS GEOCODER   ###
+### ------------------- ###
+#### Run this until complete
+# with_census <- batch_lookup(hosp17, with_census, n=500)
+# with_census2 <- with_census # save last results in the case of an error
+# 
+#### Then extract results that matched and save to CSV
+# filter(with_census, !is.na(lat)) %>% write_csv("POS_2017/tmp/census_geocode_results.csv")
+# rm(with_census2)
+
+##############################
+###   GEOCOD.IO GEOCODER   ###
+### ---------------------- ###
+# ### Run once to start
+# no_census <- hosp17 %>% anti_join(filter(with_census, !is.na(lat)))
+# with_geocodio <- batch_lookup(no_census, n=14, method = "geocodio")
+# 
+# #### Run this until complete
+# with_geocodio <- batch_lookup(no_census, with_geocodio, n=500, method = "geocodio")
+# with_geocodio2 <- with_geocodio
+# 
+# with_geocodio %>% write_csv("POS_2017/tmp/geocodio_results.csv")
+# rm(with_geocodio2)
+
+# #############################
+# ###    GOOGLE GEOCODER    ###
+# ### --------------------- ###
+# library(ggmap)
+# google <- with_geocodio %>% filter(accuracy<.5|is.na(accuracy)) %>% 
+#   semi_join(no_census, .) %>%
+#   mutate(query = str_glue("{FAC_NAME} near {city}, {state} {zipcode}"),
+#          query = as.character(query)) %>%
+#   mutate_geocode(location = query, output = "more")
+# 
+# google2 <- no_census %>% 
+#   filter(PRVDR_NUM %in% c(330109, 240033, 450748)) %>%
+#   mutate(query = str_glue("hospital near {street} in {city}, {state} {zipcode}"),
+#          query = as.character(query)) %>%
+#   mutate_geocode(location = query, output = "more")
+# 
+# # fix errors
+# google <- google %>% 
+#   filter(!PRVDR_NUM %in% c(330109, 240033, 450748)) %>%
+#   bind_rows(google2)
+# 
+# google %>% write_csv("POS_2017/tmp/google_results.csv")
+# rm(google2)
+
+rm(no_census, with_census, with_geocodio, google)
+```
+
+```{r, eval=F}
+match_census <- read_csv("POS_2017/tmp/census_geocode_results.csv") %>%
+  mutate(geo_method = "Census") %>%
+  select(HospType:zipcode, lat, long, match_type, geo_method, match_type, matched_address)
+
+match_google <- read_csv("POS_2017/tmp/google_results.csv") %>%
+    mutate(geo_method = "Google") %>%
+    select(HospType:zipcode, lat, long=lon, match_type=loctype, geo_method,
+           matched_address=address, type)
+
+match_geocodio <- read_csv("POS_2017/tmp/geocodio_results.csv",
+                           col_types = cols(
+                             address_components_secondary.prefix = col_character(),
+                             address_components.secondarynumber  = col_character(),
+                             address_components.number           = col_character())) %>%
+  filter(!PRVDR_NUM %in% match_google$PRVDR_NUM) %>%
+    mutate(geo_method = "geocodio") %>%
+    select(HospType:zipcode, lat, long, match_type=accuracy_type, geo_method, 
+           matched_address=formatted_address, accuracy)
+
+matched_results <- bind_rows(match_census, match_geocodio, match_google)
+rm(match_census, match_geocodio, match_google)
+
+# ###########################################
+# ###   Reverse geocode to census stuff   ###
+# ### ----------------------------------- ###
+# library(censusxy)
+# 
+# 
+# ## takes forever to run
+# tract_codes <- map2_df(matched_results$long[1:7818], matched_results$lat[1:7818],
+#           ~cxy_geography(.x, .y,
+#                          benchmark = "Public_AR_ACS2019", vintage = "ACS2017_ACS2019")) %>%
+#     select(Census.Tracts.GEOID, Census.Tracts.AREALAND)
+#   
+# matched_tracts <- bind_cols(matched_results, tract_codes)
+
+# ###############################################
+# ###   Match to original POS data & export   ###
+# ### --------------------------------------- ###
+# pos17 %>%
+#   select(PRVDR_NUM, FIPS_STATE_CD, FIPS_CNTY_CD, CRTFD_BED_CNT) %>%
+#   mutate(FIPS_STATE_CD = str_pad(FIPS_STATE_CD, 2, "left", pad="0"),
+#          FIPS_CNTY_CD  = str_pad(FIPS_CNTY_CD, 3, "left", pad="0"),
+#          POS.County.GEOID = str_glue("{FIPS_STATE_CD}{FIPS_CNTY_CD}"),
+#          POS.County.GEOID = as.character(POS.County.GEOID)) %>%
+#   select(PRVDR_NUM,CRTFD_BED_CNT) %>%
+# 
+#   # Join
+#   inner_join(matched_tracts) %>%
+#   mutate(GEOID = str_extract(Census.Tracts.GEOID, "^.....")) %>%
+# 
+#   write_csv("POS_2017/geocoded/POS_2017_tracts.csv")
+
+matched_tracts %>%
+  group_by(long, lat) %>%
+  filter(n()>1, ED!=Trauma)  %>% View()
+
+distinct(matched_tracts, long, lat)
+
+matched_tracts %>% group_by(Census.Tracts.GEOID) %>% 
+  summarise(Trauma = sum(Trauma),
+            NSG    = sum(NSG)) %>%
+  count(Trauma>0, NSG>0)
+  ggplot(aes(Trauma, NSG)) + geom_jitter()
+```
+
+
+
+## Determining distance
+
+First, call in the data we will be using. We'll us the US counties for all distance calculations (`US_counties`) in order to find the distance to the nearest trauma provider (`POS_2017`) or neurosurgeon. The neurosurgeon calculation can be done via geocoding their names (`provs`) or their NPI address (`provs_sens`)
+
+```{r, eval=F}
+rm(list = ls())
+
+#############################
+###   County shapefiles   ###
+### --------------------- ###
+# settings for tigris
+options(tigris_class = "sf")
+options(tigris_use_cache = T) 
+
+## Counties
+US_counties <- tigris::counties(state = c(state.abb, "DC"), cb=T, resolution = "5m") %>%
+  filter(STATEFP!="02", STATEFP!="15") %>%
+  select(GEOID)
+
+
+## Trauma center locations
+POS <- read_csv("POS_2017/geocoded/POS_2017_tracts.csv", 
+                col_types = cols(Census.Tracts.GEOID = col_character(), 
+                                 accuracy = col_double(), type = col_character())) %>%
+  st_as_sf(coords = c("long", "lat"), crs=4269)
+Trauma <- POS %>% filter(Trauma)
+NSGPOS <- POS %>% filter(NSG & ED)
+rm(POS)
+
+## Providers
+provs <- read_csv("Google_results/geo_google_raw.csv") %>%
+  filter(geoState!="hi", geoState!="ak") %>%
+  st_as_sf(coords = c("lon", "lat"), crs=4269)
+provs_sens <- read_csv("Google_results/geo_npi_byAddress.csv") %>% # Sensitivity analysis 
+  filter(geoState!="hi", geoState!="ak") %>%                       # using the NPI associated address
+  st_as_sf(coords = c("lon", "lat"), crs=4269)
+
+
+
+# ### Run this line to get the data
+# df_full <- read_csv("https://raw.githubusercontent.com/HunterRatliff1/NSG_geography/master/public_data/regression.csv") %>%
+#   mutate(region   = factor(region),
+#          division = factor(division)) %>%
+#   mutate(male   = male * 100,
+#          Over65 = Over65 *100) %>%
+#   
+#   mutate(region       = forcats::fct_relevel(region, "NORTHEAST"),
+#          division     = forcats::fct_relevel(division, "New England"),
+#          Urbanization = forcats::fct_relevel(Urbanization, "Metro"))
+# # df <- df_full %>%
+# #   filter(!is.na(Deaths)) # drop counties with missing rates
+```
+
+Next we'll define the function used to grab the distance, `find_closest_generic()`
+
+```{r, eval=F}
+
+
+
+find_closest_generic <- function(county_sf, prov_sf, centroid=T, timer=F) {
+  library(sf)
+  library(tidyverse)
+  
+  if(timer) tictoc::tic() # time the function
+  # library(testthat)
+  
+  testthat::test_that("inputs are sf objects", {
+    testthat::expect_s3_class(county_sf, "sf")
+    testthat::expect_s3_class(prov_sf, "sf")
+  })
+  
+  
+  
+  
+  testthat::test_that("Correct geometries", {
+    county_sf_geo <- as.character(st_geometry_type(county_sf)[[1]])
+    testthat::expect_equal(county_sf_geo, "MULTIPOLYGON")
+    prov_sf_geo <- as.character(st_geometry_type(prov_sf)[[1]])
+    testthat::expect_equal(prov_sf_geo, "POINT")
+  })
+  
+  if(centroid){
+    centroid_pts <- county_sf %>%
+      st_drop_geometry() %>%
+      inner_join(read_csv("Data/COUNTY_population_weighted_centroid.csv")) %>%
+      st_as_sf(coords = c("lon_county", "lat_county"), crs=4269)
+    testthat::expect_equal(nrow(centroid_pts), nrow(county_sf))
+    
+  }
+  
+  
+  
+  
+  # Finds index of nearest provider for each county
+  i <- st_nearest_feature(centroid_pts, prov_sf)
+  p <- prov_sf[i,]
+  
+  # Calculate distance for each element
+  if(centroid){
+    distance <- st_distance(p, centroid_pts, by_element=T)
+  } else({
+    
+    distance <- st_distance(p, county_sf, by_element=T)
+  })
+  
+  # append results
+  p$Distance <- units::set_units(distance, mi)
+  p$Distance <- as.numeric(p$Distance)
+  p$GEOID    <- county_sf$GEOID
+  # # Create a data frame with results
+  # df <- tibble(
+  #   GEOID         = county_sf$GEOID,
+  #   # npi           = p$npi,
+  #   # providerCity  = p$geoCity,
+  #   # providerST    = p$geoState,
+  #   Distance      = units::set_units(distance, mi),
+  #   Distance_m    = distance
+  # ) %>%
+  #   mutate(
+  #     Distance = as.numeric(Distance)
+  #   )
+  
+  # Join to county_sf to make sf object
+  df_sf <- geo_join(county_sf, st_drop_geometry(p), by="GEOID") 
+  
+  
+  if(timer) tictoc::toc() # end timer
+  return(df_sf)
+}
+
+
+```
+
+```{r, eval=F}
+# Trauma centers
+trauma_dist <- find_closest_generic(county_sf = US_counties, 
+                                    prov_sf = Trauma,
+                                    centroid = TRUE) %>%
+  select(GEOID, dist_trm_cent=Distance)
+
+trauma_dist_min <- find_closest_generic(county_sf = US_counties, 
+                                        prov_sf = Trauma,
+                                        centroid = FALSE) %>%
+  select(GEOID, dist_trm_min=Distance)
+
+# Neurosurgeons (by names)
+nsg_dist <- find_closest_generic(county_sf = US_counties, 
+                                 prov_sf = provs,
+                                 centroid = TRUE) %>%
+  select(GEOID, dist_nsg_cent=Distance)
+
+nsg_dist_min <- find_closest_generic(county_sf = US_counties, 
+                                     prov_sf = provs,
+                                     centroid = FALSE) %>%
+  select(GEOID, dist_nsg_min=Distance)
+
+
+# Neurosurgeons (by npi address)
+nsg_dist2 <- find_closest_generic(county_sf = US_counties, 
+                                 prov_sf = provs_sens,
+                                 centroid = TRUE) %>%
+  select(GEOID, dist_nsg_cent.npiAddress=Distance)
+
+nsg_dist_min2 <- find_closest_generic(county_sf = US_counties, 
+                                     prov_sf = provs_sens,
+                                     centroid = FALSE) %>%
+  select(GEOID, dist_nsg_min.npiAddress=Distance)
+
+
+# Neurosurgeons (by facility)
+nsg_dist.facility <- find_closest_generic(county_sf = US_counties, 
+                                 prov_sf = NSGPOS,
+                                 centroid = TRUE) %>%
+  select(GEOID, dist_nsg_cent.facility=Distance)
+
+nsg_dist_min.facility <- find_closest_generic(county_sf = US_counties, 
+                                     prov_sf = NSGPOS,
+                                     centroid = FALSE) %>%
+  select(GEOID, dist_nsg_min.facility=Distance)
+
+
+# MERGE
+dist <- st_drop_geometry(nsg_dist) %>%
+  inner_join( st_drop_geometry(nsg_dist_min) ) %>%
+  inner_join( st_drop_geometry(trauma_dist) ) %>%
+  inner_join( st_drop_geometry(trauma_dist_min) ) %>%
+  inner_join( st_drop_geometry(nsg_dist2) ) %>%
+  inner_join( st_drop_geometry(nsg_dist_min2) ) %>%
+  inner_join( st_drop_geometry(nsg_dist.facility) ) %>%
+  inner_join( st_drop_geometry(nsg_dist_min.facility) )
+rm(nsg_dist, nsg_dist_min, trauma_dist, trauma_dist_min, nsg_dist2, nsg_dist_min2, nsg_dist.facility,
+   nsg_dist_min.facility)
+dist %>% write_csv("Data/County_Distances.csv")
+```
+
+# Recreating dataset
+
+```{r}
+distances <- read_csv("Data/County_Distances.csv")
+
+### Run this line to get the data
+df_full <- read_csv("https://raw.githubusercontent.com/HunterRatliff1/NSG_geography/master/public_data/regression.csv") %>%
+  mutate(region   = factor(region),
+         division = factor(division)) %>%
+  mutate(male   = male * 100,
+         Over65 = Over65 *100) %>%
+  
+  mutate(region       = forcats::fct_relevel(region, "NORTHEAST"),
+         division     = forcats::fct_relevel(division, "New England"),
+         Urbanization = forcats::fct_relevel(Urbanization, "Metro")) %>%
+  
+  # Drop old distance, add new distance
+  select(-starts_with("dist_")) %>%
+  inner_join(distances)
+  
+
+
+
+
+df <- df_full %>%
+  ## Outliers
+  # filter(!GEOID %in% c("38053","20055","30085","12119","30021")) %>%
+  filter(!is.na(Deaths)) # drop counties with missing rates
+
+pairs(select(distances, -GEOID, -contains("min")))
+```
+
+## Models
+
+```{r}
+mod0 <- lm(Crude  ~ male + Over65 + Urbanization, 
+           data=mutate_at(df, vars(starts_with("dist_")), ~.x/10))
+mod1 <- update(mod0, .~. + dist_nsg_cent)
+mod2 <- update(mod0, .~. + dist_nsg_cent + dist_trm_cent)
+mod3 <- update(mod0, .~. + dist_nsg_cent * dist_trm_cent)
+```
+
+```{r, eval=F}
+library(ggfortify)
+autoplot(mod1)
+autoplot(mod2)
+autoplot(mod3)
+
+# Check VIF, hope below 5 or 10
+car::vif(mod1)
+cor(model.matrix(mod1)[,-1]) %>% corrplot::corrplot()
+
+car::vif(mod2)
+cor(model.matrix(mod2)[,-1]) %>% corrplot::corrplot()
+
+car::vif(mod3)
+cor(model.matrix(mod3)[,-1]) %>% corrplot::corrplot()
+```
+
+```{r}
+screenreg(ci.force=T, doctype=F, list(
+  mod1,
+  mod2,
+  mod3
+))
+```
+
+See [Analysis of Aggregate Count Data](http://rstudio-pubs-static.s3.amazonaws.com/62942_69e9b8ea3eff4a65ada63eaa54bb4eff.html)
+
+```{r}
+# quasipoisson
+p_mod1 <- glm(Deaths  ~ offset(log(StdPop)) + male + Over65 + Urbanization + dist_nsg_cent, 
+           data=mutate_at(df, vars(starts_with("dist_")), ~.x/10), 
+           family = poisson())
+
+nb_mod1 <- MASS::glm.nb(Deaths  ~ offset(log(StdPop)) + male + Over65 + Urbanization + 
+                          dist_nsg_cent, 
+           data=mutate_at(df, vars(starts_with("dist_")), ~.x/10))
+
+nb_mod2 <- MASS::glm.nb(Deaths  ~ offset(log(StdPop)) + male + Over65 + Urbanization +
+                          dist_nsg_cent + dist_trm_cent, 
+           data=mutate_at(df, vars(starts_with("dist_")), ~.x/10))
+
+nb_mod3 <- MASS::glm.nb(Deaths  ~ offset(log(StdPop)) + male + Over65 + Urbanization +
+                          dist_nsg_cent * dist_trm_cent, 
+           data=mutate_at(df, vars(starts_with("dist_")), ~.x/10))
+
+nb_mod4 <- MASS::glm.nb(Deaths  ~ offset(log(StdPop)) + male + Over65 + 
+                          dist_nsg_cent, 
+           data=mutate_at(df, vars(starts_with("dist_")), ~.x/10))
+
+# use offset(log(StdPop)) to fit population on log scale
+
+# arm::bayesglm()
+
+1-pchisq(p_mod1$deviance, df = p_mod1$df.residual)
+
+sjPlot::plot_model(nb_mod1)
+sjPlot::plot_model(nb_mod2)
+sjPlot::plot_model(nb_mod3)
+
+screenreg(ci.force=F, doctype=F, list(
+  mod1,
+  p_mod1,
+  nb_mod1, 
+  nb_mod2, 
+  nb_mod3,
+  nb_mod4
+))
+```
+
+
+
+```{r, results = 'asis', echo = FALSE}
+
+
+base_fit  <- lm(Crude  ~ dist_nsg_cent + male + Over65 + Urbanization, 
+                data=mutate_at(df, vars(starts_with("dist_")), ~.x/10))
+# htmlreg for knit
+screenreg(ci.force=T, doctype=F, list(
+  lm(Crude~dist_nsg_cent, data=mutate_at(df, vars(starts_with("dist_")), ~.x/10)),
+  lm(Crude~dist_trm_cent, data=mutate_at(df, vars(starts_with("dist_")), ~.x/10)),
+  lm(Crude~male, data=df),
+  lm(Crude~Over65, data=df),
+  lm(Crude~Urbanization, data=df),
+ base_fit
+))
+
+screenreg(doctype=F, list(
+  lm(Crude~dist_nsg_cent, data=mutate_at(df, vars(starts_with("dist_")), ~.x/10)),
+  lm(Crude~male, data=df),
+  lm(Crude~Over65, data=df),
+  lm(Crude~Urbanization, data=df),
+ base_fit
+))
+
+```
+
+
+
+# Other comments
+
+## Addressing the 20% of missing counties
+
+```{r}
+rate_needed <- df_full %>%
+  # anti_join(df) %>%
+  filter(is.na(Deaths)) %>%
+  mutate(RateNeeded = 100000*20/StdPop) 
+
+rate_needed <- predict(mod1, rate_needed, interval="prediction") %>%
+  as_tibble() %>%
+  bind_cols(rate_needed) %>%
+  rename(pred_rate=fit, pred_rate.lwr=lwr, pred_rate.upr=upr)
+
+rate_needed %>%
+  mutate(pred_deaths = pred_rate.lwr*StdPop/100000) %>%
+  mutate(OverPredict = pred_deaths > 20) %>%
+  count(OverPredict) %>%
+  mutate(`%` = n/sum(n))
+```
+

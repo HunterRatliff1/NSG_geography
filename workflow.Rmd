@@ -150,10 +150,53 @@ rm(trauma_pg1, trauma_pg2, trauma_pg3, x)
 df %>% write_csv("Data/TraumaCenters.csv")  
 ```
 
+Now we can geocode these locations
+
+```{r, eval=F}
+
+
+
+## Don't run
+if(F){
+  traumaCenters <- read_csv("Data/TraumaCenters.csv")
+  
+  ## First pass
+  trauma_R1 <- traumaCenters %>%
+    mutate_geocode(Address, output="more")
+  
+  ## Handle the errors
+  trauma_R2 <- trauma_R1 %>%
+    ## limit to failed geocodes or appx address
+    filter(is.na(loctype)|loctype=="approximate") %>%
+    
+    ## search for center name + city + st + zip
+    mutate(query = str_extract(Address, "[^,]+, [:upper:]{2} \\d{5}")) %>%
+    mutate(query = str_glue("{CenterName}, {query}")) %>%
+    select(query, Address:LevelFull) %>%
+    
+    ## geocode it
+    mutate_geocode(query, output="more")
+  
+  ## Merge
+  traumaGeocoded <- trauma_R1 %>%
+    ## exclude the ones that had to be re-coded
+    filter(!is.na(loctype) & loctype!="approximate") %>%
+    bind_rows(select(trauma_R2, -query)) %>%
+    select(-north, -south, -east, -west)
+  
+  ## Write to csv  
+  traumaGeocoded %>% write_csv("Data/TraumaCenters_geocoded.csv")
+}
+
+
+
+```
+
+
 I don't really use it for much in this analysis, since I'm still waiting to see if I can get a more comprehensive list from the [American Trauma Society](https://www.amtrauma.org/page/tiep).
 
 ```{r traumaCenters-data}
-traumaCenters <- read_csv("Data/TraumaCenters.csv")
+centers_geo <- read_csv("Data/TraumaCenters_geocoded.csv")
 ```
 
 
@@ -426,8 +469,10 @@ Please note that in the first step, this function finds the closest provider **b
 
 ```{r closestFxn}
 find_closest <- function(county_sf, prov_sf, centroid=T, timer=F) {
+  library(sf)
+  library(tidyverse)
   
-  if(timer) tic() # time the function
+  if(timer) tictoc::tic() # time the function
   library(testthat)
   
   test_that("inputs are sf objects", {
@@ -476,7 +521,7 @@ find_closest <- function(county_sf, prov_sf, centroid=T, timer=F) {
   df_sf <- geo_join(county_sf, df, by="GEOID") 
   
    
-  if(timer) toc() # end timer
+  if(timer) tictoc::toc() # end timer
   return(df_sf)
 }
 ```

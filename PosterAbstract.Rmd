@@ -32,9 +32,11 @@ options(tigris_use_cache = T)
 
 
 
-# get shapefiles for US counties
-US_counties <- tigris::counties(state = c(state.abb, "DC"), cb=T) %>%
+# get shapefiles for US counties & states
+US_counties <- tigris::counties(state = c(state.abb, "DC"), cb=T, resolution = "5m") %>%
   filter(STATEFP!="02", STATEFP!="15")
+US_states <- tigris::states(cb=T, resolution = "5m") %>%
+  filter(STATEFP %in% unique(US_counties$STATEFP))
 
 
 
@@ -55,7 +57,7 @@ df_full <- read_csv("https://raw.githubusercontent.com/HunterRatliff1/NSG_geogra
 
 df <- df_full %>%
   ## Outliers
-  filter(!GEOID %in% c("38053","20055","30085","12119","30021")) %>%
+  # filter(!GEOID %in% c("38053","20055","30085","12119","30021")) %>%
   filter(!is.na(Deaths)) # drop counties with missing rates
 
 
@@ -69,7 +71,7 @@ print_mean_sd <- function(x) str_glue("{print(qwraps2::mean_sd(x, na_rm = T))}")
 
 # Results
 
-Univariate descriptive statistics for each variable can be found in **Table 1**. The mean (95% CI) mortality rate among all counties was `r frmtci(mean_ci(df$Crude))` per 100,000 population (**Figure 1**). The mean (95% CI) distance to the nearest neurosurgeon was `r frmtci(mean_ci(df$dist_cent))` miles (**Figure 2**). 
+Univariate descriptive statistics for each variable can be found in **Table 1**. The mean (95% CI) mortality rate among all counties was `r frmtci(mean_ci(df$Crude), format = "est (lcl - ucl)")` per 100,000 population (**Figure 1**). The mean (95% CI) distance to the nearest neurosurgeon was `r frmtci(mean_ci(df$dist_cent), format = "est (lcl - ucl)")` miles (**Figure 2**). 
 
 ```{r Table_1,results='asis'}
 options(qwraps2_markup = "markdown")
@@ -142,8 +144,11 @@ Fig_rates <- US_counties %>%
   # filter(STATEFP=="48") %>%
   geo_join(df, by="GEOID") %>%
   ggplot() +
-  geom_sf(aes(fill=Crude), color=NA) + 
-  coord_sf(crs = 4269) +
+
+  geom_sf(data = US_states, fill=NA, color="black") +
+  geom_sf(aes(fill=Crude), color=NA) +
+
+  coord_sf(crs = 4269) + # RdYlGn
   scale_fill_distiller(palette="RdYlGn", guide = 'legend',
                        na.value = "grey50",
                        breaks = c(10,20,40,60),
@@ -151,10 +156,16 @@ Fig_rates <- US_counties %>%
                        name="TBI Mortality Rate\n(per 100,000)", direction=-1) +
   # theme_dark()
   ggthemes::theme_map() +
-  theme(legend.direction="horizontal") +
-  labs(title = "[Fig 1] TBI Mortality Rates")
+  # labs(title = "[Fig 1] TBI Mortality Rates") +
+  theme(legend.direction="horizontal")
 
-Fig_rates
+Fig_rates # export: 700 x 450
+
+Fig_rates + scale_fill_distiller(palette="Greys", guide = 'legend',
+                       na.value = "black",
+                       breaks = c(10,20,40,60),
+                       values=scales::rescale(quantile(df$Crude)),
+                       name="TBI Mortality Rate\n(per 100,000)", direction=1) 
 ```
 
 ```{r Fig2, cache=TRUE}
@@ -170,7 +181,10 @@ Fig_dist <- US_counties %>%
   # filter(STATEFP=="48") %>%
   geo_join(df_full, by="GEOID") %>%
   ggplot() +
+  
+  geom_sf(data = US_states, fill=NA, color="black") +
   geom_sf(aes(fill=dist_cent), color=NA) + 
+  
   coord_sf(crs = 4269) +
   scale_fill_distiller(palette="Blues", guide = 'legend',
                        na.value = "grey50",
@@ -179,10 +193,16 @@ Fig_dist <- US_counties %>%
                        name="Distance (miles)", direction=1) +
   # theme_dark()
   ggthemes::theme_map() +
-  theme(legend.direction="horizontal") +
-  labs(title = "[Fig 2] Distance to nearest neurosurgeon")
+  # labs(title = "[Fig 2] Distance to nearest neurosurgeon") +
+  theme(legend.direction="horizontal") 
 
-Fig_dist
+Fig_dist # export: 700 x 450
+
+Fig_dist + scale_fill_distiller(palette="Greys", guide = 'legend',
+                       na.value = "grey50",
+                       trans="sqrt",
+                       # values=scales::rescale(quantile(df$dist_cent)),
+                       name="Distance (miles)", direction=1) 
 ```
 
 
@@ -195,7 +215,7 @@ We geolocated `r nrow(count(read_csv("Google_results/geo_google_raw.csv"), npi))
 
 Among the `r nrow(df_full)` counties in the continental US, `r nrow(df_full)-nrow(df)` did not have TBI mortality rates reported because they had 20 or fewer TBI deaths. When compared with counties included in our analysis, the counties with missing TBI mortality rates tended to have a greater proportion of their population who were male (50.8% vs 49.7%; p < 0.001) or 65 years or older (18.8% vs 15.2%; p < 0.001), tended to be farther from the nearest neurosurgeon (60.0 vs 30.4 miles; p < 0.001), and to be less urban (**TABLE 1**). 
 
-Counties with missing rates also tended to have smaller populations (mean $\pm$ SD: `r print_mean_sd(subset(df_compare_missing, Exclude)$StdPop)`) than counties without missing data (`r print_mean_sd(subset(df_compare_missing, !Exclude)$StdPop)`; p<0.001), and all together counties with missing rates only accounted for 1.67% of the US population. 
+Counties with missing rates also tended to have smaller populations (mean $\pm$ SD: `r frmt(mean_sd(subset(df_compare_missing, Exclude)$StdPop), digits = 0)`) than counties without missing data (`r frmt(mean_sd(subset(df_compare_missing, !Exclude)$StdPop), digits = 0)`; p<0.001), and all together counties with missing rates only accounted for 1.67% of the US population. 
 
 ```{r, include=F}
 ## These are the tests for Table 1
@@ -247,7 +267,7 @@ df_full %>%
 
 # Mortality Rates (bi + multi-variate)
 
-Crude mortality rates were the lowest in metropolitan counties (`r nrow(subset(df, Urbanization=="Metro"))` counties; mean +/- SD rate: `r print_mean_sd(subset(df, Urbanization=="Metro")$Crude)`), followed by non-metropolitan counties (`r nrow(subset(df, Urbanization=="Nonmetro"))` counties; `r print_mean_sd(subset(df, Urbanization=="Nonmetro")$Crude)`), with rural counties having the highest rate (`r nrow(subset(df, Urbanization=="Rural"))` counties; `r print_mean_sd(subset(df, Urbanization=="Rural")$Crude)`); p < 0.001. 
+Crude mortality rates were the lowest in the `r nrow(subset(df, Urbanization=="Metro"))` metropolitan counties with a mean rate (95% CI) of `r frmtci(mean_ci(subset(df, Urbanization=="Metro")$Crude), format = "est (lcl - ucl)")`, followed by the `r nrow(subset(df, Urbanization=="Nonmetro"))` non-metropolitan counties with a rate of `r frmtci(mean_ci(subset(df, Urbanization=="Nonmetro")$Crude), format = "est (lcl - ucl)")`. The `r nrow(subset(df, Urbanization=="Rural"))` rural counties had the highest rate at `r frmtci(mean_ci(subset(df, Urbanization=="Rural")$Crude), format = "est (lcl - ucl)")`. 
 
 ```{r, include=F}
 urban_anova <- aov(Crude~Urbanization, data=df)
@@ -268,10 +288,13 @@ oneway.test(Crude~Urbanization, data=df,
 
 
 ```{r, results = 'asis', echo = FALSE}
-base_fit  <- lm(Crude  ~ dist_cent + male + Over65 + Urbanization, data=df)
+
+
+base_fit  <- lm(Crude  ~ dist_cent + male + Over65 + Urbanization, 
+                data=mutate_at(df, vars(starts_with("dist_")), ~.x/10))
 
 htmlreg(ci.force=T, doctype=F, list(
-  lm(Crude~dist_cent, data=df),
+  lm(Crude~dist_cent, data=mutate_at(df, vars(starts_with("dist_")), ~.x/10)),
   lm(Crude~male, data=df),
   lm(Crude~Over65, data=df),
   lm(Crude~Urbanization, data=df),
@@ -279,7 +302,7 @@ htmlreg(ci.force=T, doctype=F, list(
 ))
 
 htmlreg(doctype=F, list(
-  lm(Crude~dist_cent, data=df),
+  lm(Crude~dist_cent, data=mutate_at(df, vars(starts_with("dist_")), ~.x/10)),
   lm(Crude~male, data=df),
   lm(Crude~Over65, data=df),
   lm(Crude~Urbanization, data=df),
@@ -288,22 +311,7 @@ htmlreg(doctype=F, list(
 
 ```
 
-```{r, results = 'asis', eval = FALSE}
-base_fit 
 
-tibble(dist_cent = c(0,0),
-       male      = c(.0, .0),
-       Over65    = c(.0,.01),
-       Urbanization = c("Metro", "Metro")
-) %>%
-  predict(base_fit, newdata = .)
-
-3.183063 - 2.531114
-
-df %>% mutate(dist_cent = dist_cent/10) %>%
-  lm(Crude~dist_cent, data=.) %>%
-  screenreg(ci.force=T)
-```
 
 
 
@@ -345,6 +353,121 @@ htmlreg(doctype=F,
 
 
 
+
+
+
+# Other maps
+
+```{r Fig3}
+Fig_urban <- read_csv("Google_results/geo_google_raw.csv") %>%
+  filter(geoState!="hi", geoState!="ak") %>%
+  st_as_sf(coords = c("lon", "lat"), crs=4269) %>%
+  ggplot() + 
+  
+  geom_sf(data = US_states, fill=NA, color="black") +
+  geom_sf(data = geo_join(select(US_counties, -NAME), df_full, by="GEOID"), 
+          aes(fill=Urbanization), color=NA) +
+  geom_sf(alpha=0.25) +
+  
+  
+  coord_sf(crs = 4269) +
+  ggthemes::theme_map() +
+  scale_fill_brewer(direction = -1, palette = "greens") +
+  # labs(title = "[Fig 3] Urbanization Level") +
+  theme(legend.direction="horizontal") 
+Fig_urban  # export: 700 x 450
+
+Fig_urban + scale_fill_brewer(direction = -1, palette = "Greys") 
+```
+
+# imputed rates
+
+```{r}
+TBIs_org <- read_csv("Data/TBI_Deaths.csv") %>%
+  # Correct Shannon, SD to it's new name
+  mutate(CountyFIPS = ifelse(CountyFIPS=="46113", "46102", CountyFIPS),
+         County     = ifelse(CountyFIPS=="46102", "OGLALA LAKOTA", County)) %>%
+  
+  ## logical indicating if deaths was originally missing
+  mutate(imputed = is.na(Deaths))
+
+TBI_Overall_state <- read_csv("TBI_data/State/TBI_Overall_state.csv") %>%
+  select(ST:Deaths_ST)
+
+
+TBI_imputed <- TBIs_org %>%
+  # filter(ST=="MA") %>%
+  
+  ## For each state, find the number of deaths accounted for, and 
+  ## total population of those counties with rates
+  group_by(ST, imputed) %>%
+  summarise(Deaths = sum(Deaths, na.rm = T),
+            Pop    = sum(Population, na.rm=T)) %>%
+  left_join(TBI_Overall_state) %>%
+  
+  
+  ## Limiting to counties with existing rates, find the
+  ## number of deaths and population unaccounted for
+  filter(!imputed) %>%
+  mutate(Pop_miss    = StdPop_ST - Pop,
+         Deaths_miss = Deaths_ST - Deaths) %>%
+  
+  
+  ## Determine the hypothetical mortality rate in
+  ## counties with missing data. Join to original
+  ## data.frame
+  mutate(rate_miss = Deaths_miss/Pop_miss) %>%  # This is the raw rate (not the rate per 100,000)
+  select(ST, rate_miss, starts_with("n_"), Deaths_miss) %>%
+  left_join(TBIs_org, .) %>%
+  
+  # filter(ST=="MA") %>%
+  
+  ## Impute the missing rates, by calculating the projected number of
+  ## deaths. If that's over 20, round down (since we know that can't
+  ## be the case). Then, calculate the crude mortality rate
+  mutate(Deaths     = if_else(imputed, round(Population*rate_miss), Deaths),
+         OverEst    = if_else(imputed & Deaths > 20, TRUE, FALSE),
+         Deaths     = if_else(imputed & Deaths > 20, 20, Deaths),
+         Crude_Rate = 100000*Deaths/Population) %>%
+  
+  ## Add checks and benchmarks 
+  group_by(ST) %>%
+  mutate(n_missing    = sum(imputed),
+         prop_missing = sum(imputed)/n()) 
+```
+
+
+```{r}
+## shapefile of imputed counties
+Imputed_shp <- US_counties %>%
+  geo_join(rename(TBI_imputed, GEOID=CountyFIPS), by="GEOID") %>%
+  filter(imputed)
+
+Fig_impute <- US_counties %>%
+  # filter(STATEFP=="48") %>%
+  geo_join(rename(TBI_imputed, GEOID=CountyFIPS), by="GEOID") %>%
+  left_join(select(df_full, GEOID, region, division)) %>%
+  # filter(region %in% c("WEST","MIDWEST")|ST=="TX") %>%
+  ggplot() +
+  geom_sf(data = US_states, fill=NA, color="black") +
+  geom_sf(aes(fill=scales::squish(Crude_Rate, range=c(0,70))), color=NA) + 
+  geom_sf(data = Imputed_shp, fill="grey", color=NA, alpha=0.65) +
+  
+  coord_sf(crs = 4269) +
+  scale_fill_distiller(palette="RdYlGn", guide = 'legend',
+                       na.value = "grey50",
+                       breaks = c(10,20,40,60),
+                       # values=scales::rescale(quantile(TBI_imputed$Crude_Rate)),
+                       values=scales::rescale(quantile(scales::squish(df$Crude, range=c(0,70)))),
+                       name="TBI Mortality Rate\n(per 100,000)", direction=-1) +
+  # theme_dark()
+  ggthemes::theme_map() +
+  theme(legend.direction="horizontal") +
+  labs(title = "[Fig 4] IMPUTED TBI Mortality Rates",
+       caption="Imputed counties are greyed out")
+
+Fig_impute
+```
 
 
 
@@ -463,7 +586,7 @@ Mortality rates also varied by the number of neurosurgeons in the county (**Tabl
 
 TABLE 4
 
-```{r Table4}
+```{r Table4, eval=F}
  tb2a <- df %>%
     group_by(Urbanization) %>%
   summarise(n = n(),
@@ -502,8 +625,8 @@ rate_needed %>%
   mutate(OverPredict = pred_deaths > 20) %>%
   count(OverPredict)
 
-  ggplot(aes(x=pred_deaths)) +
-  geom_density()
+  # ggplot(aes(x=pred_deaths)) +
+  # geom_density()
 
 
 rate_needed %>%

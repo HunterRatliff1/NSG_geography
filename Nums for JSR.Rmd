@@ -1,0 +1,442 @@
+---
+title: "JSR Manuscript Calculations"
+author: "Hunter Ratliff, htratlif@utmb.edu"
+date: "7/25/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=F, warning=F, message=F)
+library(magrittr)
+library(scales)
+library(RColorBrewer)
+library(ggthemes)
+library(cowplot)
+library(sf)       # newer, better version of sp
+library(tigris)   # for shapefiles
+library(sjPlot);  # for lm plots
+library(qwraps2)  # gives nice wrapper to calculate mean/CI with inline R code
+library(texreg)   # Pretty regression tables
+library(tidyverse)
+library(gt)
+
+# settings for tigris
+options(tigris_class = "sf")
+options(tigris_use_cache = T) 
+
+# functions to print stats inline
+print_mean_ci <- function(x) str_glue("{print(frmtci(mean_ci(x), format = 'est (lcl - ucl)'))}")
+print_mean_sd <- function(x) str_glue("{print(qwraps2::mean_sd(x, na_rm = T))}")
+
+
+
+########################
+###   READ IN DATA   ###
+### ---------------- ###
+# get shapefiles for US counties & states
+US_counties <- tigris::counties(state = c(state.abb, "DC"), cb=T, resolution = "5m") %>%
+  filter(STATEFP!="02", STATEFP!="15")
+US_states <- tigris::states(cb=T, resolution = "5m") %>%
+  filter(STATEFP %in% unique(US_counties$STATEFP))
+
+# Distances for each county (from review_comment_v1.Rmd)
+distances <- read_csv("Data/County_Distances-WEIGHTED.csv")
+
+
+# Our main dataset
+df_full <- "https://raw.githubusercontent.com/HunterRatliff1/NSG_geography/master/public_data/regression.csv" %>%
+  read_csv() %>%
+  
+  select(-region, -division) %>%
+  mutate(male   = male * 100,
+         Over65 = Over65 *100) %>%
+  mutate(Urbanization = forcats::fct_relevel(Urbanization, "Metro")) %>%
+  
+  # Drop old distance, add new distance
+  select(-starts_with("dist_")) %>%
+  inner_join(distances)
+
+df <- df_full %>%
+  filter(!is.na(Deaths)) # drop counties with missing rates
+
+rm(distances)
+```
+
+# Methods info
+
+```{r, echo=T, collapse=T}
+## Number of neurosurgeons:
+read_csv("Google_results/geo_google_raw.csv") %>%
+  filter(geoState!="hi", geoState!="ak") %>%
+  nrow()
+
+## Number of trauma facilites
+read_csv("POS_2017/geocoded/POS_2017_tracts.csv", 
+                col_types = cols(Census.Tracts.GEOID = col_character(), 
+                                 accuracy = col_double(), type = col_character())) %>%
+  filter(HospType!="Long term") %>%
+  filter(Trauma) %>%
+  nrow()
+```
+
+# Results
+
+Univariate descriptive statistics for each variable can be found in *Table 1*. The mean (95% CI) mortality rate among all counties was <b>`r frmtci(mean_ci(df$Crude), format = "est (lcl - ucl)")`</b> per 100,000 population (*Figure 1*). The mean (95% CI) distance to the nearest neurosurgeon was <b>`r frmtci(mean_ci(df$dist_nsg_cent), format = "est (lcl - ucl)")`</b> miles (*Figure 2*). 
+
+```{r Table_1,results='asis'}
+options(qwraps2_markup = "markdown")
+df_compare_missing <- df_full %>%
+  anti_join(df) %>%
+  mutate(Exclude = T) %>%
+  bind_rows(df) %>%
+  mutate(Exclude = replace_na(Exclude, F)) %>%
+  group_by(Exclude) 
+
+tbl1_summary <- list("Distance to nearest neurosurgeon (miles)" =
+                       list("Mean (95% CI)" = ~ frmtci(qwraps2::mean_ci(.data$dist_nsg_cent)),
+                            "Median (IQR)"  = ~ qwraps2::median_iqr(.data$dist_nsg_cent)),
+                     "Distance to nearest trauma facility (miles)" = 
+                       list("Mean (95% CI)" = ~ frmtci(qwraps2::mean_ci(.data$dist_trm_cent)),
+                            "Median (IQR)"  = ~ qwraps2::median_iqr(.data$dist_trm_cent)),
+                     "% Male" = 
+                       list("Mean (95% CI)" = ~ frmtci(qwraps2::mean_ci(.data$male)),
+                            # "Mean (SD)"     = ~ qwraps2::mean_sd(.data$male, denote_sd = "paren"),
+                            "Median (IQR)"  = ~ qwraps2::median_iqr(.data$male)),
+                     "% 65 or older" = 
+                       list("Mean (95% CI)" = ~ frmtci(qwraps2::mean_ci(.data$Over65)),
+                            # "Mean (SD)"     = ~ qwraps2::mean_sd(.data$Over65, denote_sd = "paren"),
+                            "Median (IQR)"  = ~ qwraps2::median_iqr(.data$Over65)),
+                     "Urbanization" = 
+                       list("Metro (%)"     = ~ qwraps2::n_perc0(.data$Urbanization == "Metro"),
+                            "Nonmetro (%)"  = ~ qwraps2::n_perc0(.data$Urbanization == "Nonmetro"),
+                            "Rural (%)"     = ~ qwraps2::n_perc0(.data$Urbanization == "Rural")),
+                     "Population" =
+                       list("Mean (95% CI)" = ~ frmtci(qwraps2::mean_ci(.data$StdPop), digits=0),
+                            # "Mean (SD)"     = ~ qwraps2::mean_sd(.data$StdPop, digits=0, denote_sd = "paren"),
+                            "Median (IQR)"  = ~ qwraps2::median_iqr(.data$StdPop, digits=0))
+)
+
+cbind(
+  {df_compare_missing %>% ungroup() %>% summary_table(tbl1_summary)},
+  {df_compare_missing %>% group_by(Exclude)  %>% summary_table(tbl1_summary)}
+) %>% print(rtitle = "Table 1")
+
+## Sup table 1
+# df %>%
+#   mutate(male   = male * 100,
+#          Over65 = Over65 * 100) %>%
+#   select(Crude, AgeAdj, dist_cent, male, Over65, Urbanization, num_provs) %>%
+#   select(-num_provs) %>%
+#   desctable::desctable(stats = list("N"            = length,
+#                                     "Mean +/- SD"  = qwraps2::mean_sd,
+#                                     "median (IQR)" = qwraps2::median_iqr,
+#                                     "min"          = min,
+#                                     "max"          = max,
+#                                     "%"            = is.factor ~ percent),
+#                        labels = c(Over65    =  "65 years or older (%)",
+#                                   male      = "Male (%)",
+#                                   dist_cent = "Distance (miles)",
+#                                   Crude     = "Crude rate",
+#                                   AgeAdj    = "Age adjusted rate")) %>%
+#   desctable::pander.desctable()
+
+# top_n(df, 1, wt=dist_cent) %>% str_glue_data("{NAME}, {ST} with a distance of {round(dist_cent)} miles") 
+```
+
+
+```{r Fig1, cache=TRUE, eval=FALSE}
+########################
+##   CACHED RESULTS   ##
+########################
+## Take care not to edit this chunk unless you absolutly must, since it takes a minute to render
+##
+##
+
+Fig_rates <- US_counties %>%
+  # filter(STATEFP=="48") %>%
+  geo_join(df, by="GEOID") %>%
+  ggplot() +
+
+  geom_sf(data = US_states, fill=NA, color="black") +
+  geom_sf(aes(fill=Crude), color=NA) +
+
+  coord_sf(crs = 4269) + # RdYlGn
+  scale_fill_distiller(palette="RdYlGn", guide = 'legend',
+                       na.value = "grey50",
+                       breaks = c(10,20,40,60),
+                       values=scales::rescale(quantile(df$Crude)),
+                       name="TBI Mortality Rate\n(per 100,000)", direction=-1) +
+  # theme_dark()
+  ggthemes::theme_map() +
+  # labs(title = "[Fig 1] TBI Mortality Rates") +
+  theme(legend.direction="horizontal")
+
+Fig_rates # export: 700 x 450
+
+Fig_rates + scale_fill_distiller(palette="Greys", guide = 'legend',
+                       na.value = "black",
+                       breaks = c(10,20,40,60),
+                       values=scales::rescale(quantile(df$Crude)),
+                       name="TBI Mortality Rate\n(per 100,000)", direction=1) 
+```
+
+```{r Fig2, cache=TRUE, eval=FALSE}
+########################
+##   CACHED RESULTS   ##
+########################
+## Take care not to edit this chunk unless you absolutly must, since it takes a minute to render
+##
+##
+
+Fig_dist <- US_counties %>%
+  select(-NAME) %>%
+  # filter(STATEFP=="48") %>%
+  geo_join(df_full, by="GEOID") %>%
+  ggplot() +
+  
+  geom_sf(data = US_states, fill=NA, color="black") +
+  geom_sf(aes(fill=dist_cent), color=NA) + 
+  
+  coord_sf(crs = 4269) +
+  scale_fill_distiller(palette="Blues", guide = 'legend',
+                       na.value = "grey50",
+                       trans="sqrt",
+                       # values=scales::rescale(quantile(df$dist_cent)),
+                       name="Distance (miles)", direction=1) +
+  # theme_dark()
+  ggthemes::theme_map() +
+  # labs(title = "[Fig 2] Distance to nearest neurosurgeon") +
+  theme(legend.direction="horizontal") 
+
+Fig_dist # export: 700 x 450
+
+Fig_dist + scale_fill_distiller(palette="Greys", guide = 'legend',
+                       na.value = "grey50",
+                       trans="sqrt",
+                       # values=scales::rescale(quantile(df$dist_cent)),
+                       name="Distance (miles)", direction=1) 
+```
+
+## Missing TBI Rates
+
+ 
+
+```{r, include=F}
+#  tests for sup table 1
+
+# Distance to neurosurgeon
+qplot(dist_nsg_cent, Exclude, geom="boxplot", data=df_compare_missing)
+qplot(dist_nsg_cent, fill=Exclude, geom="density", alpha=.5, data=df_compare_missing)
+t.test(dist_nsg_cent ~ Exclude, data=df_compare_missing)
+
+# Distance to trauma facility
+qplot(dist_trm_cent, Exclude, geom="boxplot", data=df_compare_missing)
+qplot(dist_trm_cent, fill=Exclude, geom="density", alpha=.5, data=df_compare_missing)
+t.test(dist_trm_cent ~ Exclude, data=df_compare_missing)
+
+# Male
+qplot(male, Exclude, geom="boxplot", data=df_compare_missing)
+qplot(male, fill=Exclude, geom="density", alpha=.5, data=df_compare_missing)
+t.test(male ~ Exclude, data=df_compare_missing)
+
+# Over 65
+qplot(Over65, Exclude, geom="boxplot", data=df_compare_missing)
+qplot(Over65, fill=Exclude, geom="density", alpha=.5, data=df_compare_missing)
+t.test(Over65 ~ Exclude, data=df_compare_missing)
+
+# Urbanization
+mosaicplot(Urbanization~Exclude, data=df_compare_missing)
+chisq.test(df_compare_missing$Urbanization, df_compare_missing$Exclude)
+
+# Population
+qplot(StdPop, fill=Exclude, geom="density", alpha=.5, data=df_compare_missing) + scale_x_log10()
+wilcox.test(StdPop ~ Exclude, data=df_compare_missing)
+
+## How much of the population is missing?
+df_full %>%
+  mutate(missing = ifelse(is.na(Deaths), "Missing", "No")) %>%
+  group_by(missing) %>%
+  summarise(
+    num = n(),
+    pop = sum(pop12)
+  ) %>%
+  mutate(`% missing`=num/sum(num),
+         `% pop` = pop/sum(pop))
+```
+
+# Bivariate
+
+First some helper functions
+
+```{r}
+make_table_2 <- function(.data, 
+                         family="nb", # can be p, qp, or nb
+                         divide_distance=25, 
+                         return_mods=F){
+  
+  # Internal function
+  bivariate <- function(.data, 
+                      model_type = "p", # can be p, qp, or nb
+                      base_vars=c("male", "Over65", "Urbanization"),
+                      key_predictors = c("dist_nsg_cent", "dist_trm_cent")) {
+  
+  all_preds <- c(base_vars, key_predictors)
+  all_preds <- c(all_preds, paste0(all_preds, collapse = " + "))
+  
+  
+  fit_mod <- function(x){
+    formula1 <- paste("Deaths  ~ offset(log(StdPop)) + ", x) %>% as.formula()
+    
+    if(model_type=="p")  mod <- glm(formula1,          data=.data, family = poisson())
+    if(model_type=="qp") mod <- glm(formula1,          data=.data, family = quasipoisson())
+    if(model_type=="nb") mod <- MASS::glm.nb(formula1, data=.data)
+    
+    mod
+    
+  }
+  
+  bivar_mods <- all_preds %>%
+    map(~fit_mod(.x)) 
+
+  
+  }
+  
+  # Internal function
+  extract_mods <- function(x){
+    # Determine the number of predictors
+    # (used to determine if adjusted model later)
+    n_predictors <- length(unlist(insight::find_predictors(x)))
+    
+    x %>% 
+      parameters::model_parameters(exponentiate=T) %>%
+      as_tibble() %>%
+      select(Parameter, Coefficient, CI_low, CI_high, p) %>%
+      mutate(n_predictors = n_predictors)
+  }
+    
+  ########################
+  ###   BEGIN SCRIPT   ###
+  ### ---------------- ###
+  cli::cli_alert_info('Using model family {switch(family, "p"="Poisson", "qp"="Quasipoisson", "nb"="Negative Binomial")}')
+  cli::cli_alert_info('All distances are divided by {divide_distance}')
+  
+  
+  mods <- .data %>%
+    mutate_at(vars(starts_with("dist_")), ~.x/divide_distance) %>%
+    bivariate(model_type = family)
+  
+  # if(family=="p") AER::dispersiontest( mods[[length(mods)]] )
+  
+  if(return_mods) return(mods)
+  
+  
+  mods %>% 
+  map_df(extract_mods) %>%
+  mutate(adjusted = if_else(n_predictors==max(n_predictors), "Adjusted", "Bivariate")) %>%
+  filter(!str_detect(Parameter, "Intercept")) %>%
+  mutate(CI = str_glue("({signif(CI_low, 3)} - {signif(CI_high, 3)})"),
+         Coefficient = signif(Coefficient, 3),
+         p = ifelse(p<.001, "<0.001", round(p, 3))) %>%
+  
+  select(Parameter, Coefficient, CI, p, adjusted) %>%
+  pivot_wider(names_from = adjusted, 
+              names_glue = "{.value}.{adjusted}",
+              values_from=-Parameter) %>%
+
+  select(-starts_with("adjusted")) %>%
+  
+  gt(rowname_col = "Parameter") %>% 
+  tab_spanner(
+    label = "Unadjusted",
+    columns = ends_with("Bivariate")
+  ) %>%
+  tab_spanner(
+    label = "Adjusted",
+    columns = ends_with("Adjusted")
+  ) %>%
+  
+  cols_label(
+    Coefficient.Bivariate = "MRR",
+    Coefficient.Adjusted  = "aMRR",
+    CI.Bivariate  = "95% CI",
+    CI.Adjusted   = "95% CI",
+    p.Bivariate   = "p value",
+    p.Adjusted    = "p value"
+  ) %>%
+  
+  tab_header(
+    title = "Table 2",
+    subtitle = paste0("Using a ", # insight::model_info(mods[[6]])$family
+                      switch(family, "p"="Poisson", "qp"="Quasipoisson", "nb"="Negative Binomial"), 
+                      " regression")
+  ) %>%
+  tab_footnote(
+    footnote = paste0("Per ", divide_distance ," mile increase in distance"),
+    locations = cells_stub(rows = contains("dist"))
+  )
+}
+
+
+
+
+```
+
+We also might need to settle on which unit of analysis to use. Right now, I'm presenting distance using the following
+
+```{r, echo=T, message=T}
+# Fit models for table 2, using specified family
+make_table_2(df, family = "nb", divide_distance = 25)
+```
+
+```{r, echo=T, message=T}
+
+make_table_2(df, family = "qp", divide_distance = 25) 
+```
+
+```{r}
+# # mods %>% sjPlot::tab_model(collapse.ci = T, show.aic = T)
+# 
+# mods %>% 
+#   map_df(extract_mods) %>%
+#   mutate(adjusted = if_else(n_predictors==max(n_predictors), "Adjusted", "Bivariate")) %>%
+#   filter(!str_detect(Parameter, "Intercept")) %>%
+#   mutate(CI = str_glue("({signif(CI_low, 3)} - {signif(CI_high, 3)})"),
+#          Coefficient = signif(Coefficient, 3),
+#          p = ifelse(p<.001, "<0.001", round(p, 3))) %>%
+#   
+#   select(Parameter, Coefficient, CI, p, adjusted) %>%
+#   pivot_wider(names_from = adjusted, 
+#               names_glue = "{.value}.{adjusted}",
+#               values_from=-Parameter) %>%
+# 
+#   select(-starts_with("adjusted")) %>%
+#   
+#   gt() %>% 
+#   tab_spanner(
+#     label = "Unadjusted",
+#     columns = ends_with("Bivariate")
+#   ) %>%
+#   tab_spanner(
+#     label = "Adjusted",
+#     columns = ends_with("Adjusted")
+#   ) %>%
+#   
+#   cols_label(
+#     Coefficient.Bivariate = "MRR",
+#     Coefficient.Adjusted  = "aMRR",
+#     CI.Bivariate  = "95% CI",
+#     CI.Adjusted   = "95% CI",
+#     p.Bivariate   = "p value",
+#     p.Adjusted    = "p value"
+#   ) %>%
+#   
+#   tab_header(
+#     title = "Table 2",
+#     subtitle = paste0("Using a ", insight::model_info(mods[[6]])$family, " regression")
+#   ) 
+
+
+```
+
+
+
