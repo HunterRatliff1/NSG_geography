@@ -252,20 +252,25 @@ rm(match_census, match_geocodio, match_google)
 #   mutate(GEOID = str_extract(Census.Tracts.GEOID, "^.....")) %>%
 # 
 #   write_csv("POS_2017/geocoded/POS_2017_tracts.csv")
-
-matched_tracts %>%
-  group_by(long, lat) %>%
-  filter(n()>1, ED!=Trauma)  %>% View()
-
-distinct(matched_tracts, long, lat)
-
-matched_tracts %>% group_by(Census.Tracts.GEOID) %>% 
-  summarise(Trauma = sum(Trauma),
-            NSG    = sum(NSG)) %>%
-  count(Trauma>0, NSG>0)
-  ggplot(aes(Trauma, NSG)) + geom_jitter()
+# 
+# matched_tracts %>%
+#   group_by(long, lat) %>%
+#   filter(n()>1, ED!=Trauma)  %>% View()
+# 
+# distinct(matched_tracts, long, lat)
+# 
+# matched_tracts %>% group_by(Census.Tracts.GEOID) %>% 
+#   summarise(Trauma = sum(Trauma),
+#             NSG    = sum(NSG)) %>%
+#   count(Trauma>0, NSG>0)
+#   ggplot(aes(Trauma, NSG)) + geom_jitter()
 ```
 
+Here's the info on POS
+
+```{r}
+POS_2017_tracts <- read_csv("POS_2017/geocoded/POS_2017_tracts.csv")
+```
 
 
 ## Determining distance
@@ -292,6 +297,7 @@ US_counties <- tigris::counties(state = c(state.abb, "DC"), cb=T, resolution = "
 POS <- read_csv("POS_2017/geocoded/POS_2017_tracts.csv", 
                 col_types = cols(Census.Tracts.GEOID = col_character(), 
                                  accuracy = col_double(), type = col_character())) %>%
+  filter(HospType!="Long term") %>%
   st_as_sf(coords = c("long", "lat"), crs=4269)
 Trauma <- POS %>% filter(Trauma)
 NSGPOS <- POS %>% filter(NSG & ED)
@@ -321,13 +327,16 @@ provs_sens <- read_csv("Google_results/geo_npi_byAddress.csv") %>% # Sensitivity
 # #   filter(!is.na(Deaths)) # drop counties with missing rates
 ```
 
+This gives us `r nrow(Trauma)`
+
 Next we'll define the function used to grab the distance, `find_closest_generic()`
 
 ```{r, eval=F}
 
 
 
-find_closest_generic <- function(county_sf, prov_sf, centroid=T, timer=F) {
+find_closest_generic <- function(county_sf, prov_sf, 
+                                 centroid=T, weighted=T, timer=F) {
   library(sf)
   library(tidyverse)
   
@@ -349,12 +358,13 @@ find_closest_generic <- function(county_sf, prov_sf, centroid=T, timer=F) {
     testthat::expect_equal(prov_sf_geo, "POINT")
   })
   
-  if(centroid){
-    centroid_pts <- county_sf %>%
+  if(centroid & weighted){
+    county_old <- county_sf
+    county_sf <- county_sf %>%
       st_drop_geometry() %>%
       inner_join(read_csv("Data/COUNTY_population_weighted_centroid.csv")) %>%
       st_as_sf(coords = c("lon_county", "lat_county"), crs=4269)
-    testthat::expect_equal(nrow(centroid_pts), nrow(county_sf))
+    testthat::expect_equal(nrow(county_sf), nrow(county_old))
     
   }
   
@@ -362,12 +372,14 @@ find_closest_generic <- function(county_sf, prov_sf, centroid=T, timer=F) {
   
   
   # Finds index of nearest provider for each county
-  i <- st_nearest_feature(centroid_pts, prov_sf)
+  i <- st_nearest_feature(county_sf, 
+                          prov_sf)
   p <- prov_sf[i,]
   
   # Calculate distance for each element
   if(centroid){
-    distance <- st_distance(p, centroid_pts, by_element=T)
+    distance <- st_distance(p, st_centroid(county_sf), 
+                            by_element=T)
   } else({
     
     distance <- st_distance(p, county_sf, by_element=T)
@@ -460,13 +472,16 @@ dist <- st_drop_geometry(nsg_dist) %>%
   inner_join( st_drop_geometry(nsg_dist_min.facility) )
 rm(nsg_dist, nsg_dist_min, trauma_dist, trauma_dist_min, nsg_dist2, nsg_dist_min2, nsg_dist.facility,
    nsg_dist_min.facility)
-dist %>% write_csv("Data/County_Distances.csv")
+# dist %>% write_csv("Data/County_Distances.csv")
+dist %>% write_csv("Data/County_Distances-WEIGHTED.csv")
+read_csv("Data/County_Distances-WEIGHTED.csv") %>%
+  write_csv("public_data/County_Distances-WEIGHTED.csv")
 ```
 
 # Recreating dataset
 
 ```{r}
-distances <- read_csv("Data/County_Distances.csv")
+distances <- read_csv("Data/County_Distances-WEIGHTED.csv")
 
 ### Run this line to get the data
 df_full <- read_csv("https://raw.githubusercontent.com/HunterRatliff1/NSG_geography/master/public_data/regression.csv") %>%
@@ -534,7 +549,8 @@ See [Analysis of Aggregate Count Data](http://rstudio-pubs-static.s3.amazonaws.c
 
 ```{r}
 # quasipoisson
-p_mod1 <- glm(Deaths  ~ offset(log(StdPop)) + male + Over65 + Urbanization + dist_nsg_cent, 
+p_mod1 <- glm(Deaths  ~ offset(log(StdPop)) + male + Over65 + Urbanization + 
+                dist_nsg_cent, 
            data=mutate_at(df, vars(starts_with("dist_")), ~.x/10), 
            family = poisson())
 
