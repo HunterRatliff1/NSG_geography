@@ -40,7 +40,10 @@ US_states <- tigris::states(cb=T, resolution = "5m") %>%
   filter(STATEFP %in% unique(US_counties$STATEFP))
 
 # Distances for each county (from review_comment_v1.Rmd)
-distances <- read_csv("Data/County_Distances-WEIGHTED.csv")
+# distances <- read_csv("Data/County_Distances-WEIGHTED.csv")
+distances <- paste0("https://raw.githubusercontent.com/HunterRatliff1/",
+                    "NSG_geography/master/public_data/County_Distances-WEIGHTED.csv") %>%
+  read_csv()
 
 
 # Our main dataset
