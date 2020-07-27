@@ -47,7 +47,8 @@ distances <- paste0("https://raw.githubusercontent.com/HunterRatliff1/",
 
 
 # Our main dataset
-df_full <- "https://raw.githubusercontent.com/HunterRatliff1/NSG_geography/master/public_data/regression.csv" %>%
+df_full <- paste0("https://raw.githubusercontent.com/HunterRatliff1/",
+                  "NSG_geography/master/public_data/regression.csv") %>%
   read_csv() %>%
   
   select(-region, -division) %>%
@@ -386,13 +387,12 @@ make_table_2 <- function(.data,
 
 We also might need to settle on which unit of analysis to use. Right now, I'm presenting distance using the following
 
-```{r, echo=T, message=T}
+```{r, echo=T, message=T, collapse=T}
 # Fit models for table 2, using specified family
 make_table_2(df, family = "nb", divide_distance = 25)
 ```
 
-```{r, echo=T, message=T}
-
+```{r, echo=T, message=T, collapse=T}
 make_table_2(df, family = "qp", divide_distance = 25) 
 ```
 
