@@ -87,6 +87,18 @@ read_csv("POS_2017/geocoded/POS_2017_tracts.csv",
 
 Univariate descriptive statistics for each variable can be found in *Table 1*. The mean (95% CI) mortality rate among all counties was <b>`r frmtci(mean_ci(df$Crude), format = "est (lcl - ucl)")`</b> per 100,000 population (*Figure 1*). The mean (95% CI) distance to the nearest neurosurgeon was <b>`r frmtci(mean_ci(df$dist_nsg_cent), format = "est (lcl - ucl)")`</b> miles (*Figure 2*). 
 
+```{r}
+read_csv("Google_results/geo_google_raw.csv") %>%
+  filter(geoState!="hi", geoState!="ak") %>%
+  rename(GEOID=geoCounty) %>%
+  left_join(select(df_full, GEOID, Urbanization)) %>%
+  count(Urbanization) %>%
+  mutate(`%` = round(n/sum(n), 4)*100)
+  
+  
+```
+
+
 ```{r Table_1,results='asis'}
 options(qwraps2_markup = "markdown")
 df_compare_missing <- df_full %>%
@@ -268,7 +280,7 @@ df_full %>%
          `% pop` = pop/sum(pop))
 ```
 
-# Bivariate
+## Bivariate & Multivariate
 
 First some helper functions
 
@@ -276,12 +288,13 @@ First some helper functions
 make_table_2 <- function(.data, 
                          family="nb", # can be p, qp, or nb
                          divide_distance=25, 
-                         return_mods=F){
+                         return_mods=F,
+                         baseVars=c("male", "Over65", "Urbanization")){
   
   # Internal function
   bivariate <- function(.data, 
                       model_type = "p", # can be p, qp, or nb
-                      base_vars=c("male", "Over65", "Urbanization"),
+                      base_vars=baseVars,
                       key_predictors = c("dist_nsg_cent", "dist_trm_cent")) {
   
   all_preds <- c(base_vars, key_predictors)
@@ -360,8 +373,8 @@ make_table_2 <- function(.data,
   ) %>%
   
   cols_label(
-    Coefficient.Bivariate = "MRR",
-    Coefficient.Adjusted  = "aMRR",
+    Coefficient.Bivariate = "IRR",
+    Coefficient.Adjusted  = "aIRR",
     CI.Bivariate  = "95% CI",
     CI.Adjusted   = "95% CI",
     p.Bivariate   = "p value",
@@ -390,6 +403,7 @@ We also might need to settle on which unit of analysis to use. Right now, I'm pr
 ```{r, echo=T, message=T, collapse=T}
 # Fit models for table 2, using specified family
 make_table_2(df, family = "nb", divide_distance = 25)
+base_mod <- make_table_2(df, family = "nb", divide_distance = 25, return_mods = T)[[6]]
 ```
 
 ```{r, echo=T, message=T, collapse=T}
@@ -441,5 +455,305 @@ make_table_2(df, family = "qp", divide_distance = 25)
 
 ```
 
+## Sensitivity
 
+This is the formula used for our main analysis. Assure that this is the same for sensitivity analysis
+
+```{r}
+insight::find_formula(base_mod)$conditional
+```
+
+```{r}
+base_mod <- MASS::glm.nb(Deaths ~ offset(log(StdPop)) + male + Over65 + Urbanization +
+                           dist_nsg_cent + dist_trm_cent, 
+                         data = mutate_at(df, vars(starts_with("dist_")), ~.x/25))
+
+mod_A <- base_mod %>%
+  parameters::model_parameters(exponentiate=T) %>%
+      as_tibble() %>%
+      select(Parameter, Coefficient, CI_low, CI_high, p) %>%
+  mutate(Mod = "A")
+
+mod_B <- mutate_at(df, vars(starts_with("dist_")), ~.x/25) %>% 
+  # select(Deaths:StdPop) %>%
+  mutate(Deaths2 = round(AgeAdj * StdPop / 1e5)) %>%
+  update(base_mod, Deaths2~., data=.) %>%
+  parameters::model_parameters(exponentiate=T) %>%
+      as_tibble() %>%
+      select(Parameter, Coefficient, CI_low, CI_high, p) %>%
+  mutate(Mod = "B")
+
+mod_C <- update(base_mod, .~. - dist_trm_cent)  %>% 
+      parameters::model_parameters(exponentiate=T) %>%
+      as_tibble() %>%
+      select(Parameter, Coefficient, CI_low, CI_high, p) %>%
+  mutate(Mod = "C")
+# mod_C <- update(base_mod, .~. + dist_nsg_min + dist_trm_min - dist_nsg_cent - dist_trm_cent)  %>% 
+#       parameters::model_parameters(exponentiate=T) %>%
+#       as_tibble() %>%
+#       select(Parameter, Coefficient, CI_low, CI_high, p) %>%
+#   mutate(Mod = "C")
+
+mod_D <- update(base_mod, .~. - dist_nsg_cent)  %>% 
+      parameters::model_parameters(exponentiate=T) %>%
+      as_tibble() %>%
+      select(Parameter, Coefficient, CI_low, CI_high, p) %>%
+  mutate(Mod = "D")
+# mod_D <- update(base_mod, .~. + dist_nsg_min + dist_trm_min - dist_nsg_cent - dist_trm_cent, 
+#                 subset = dist_nsg_min != 0)  %>% 
+#       parameters::model_parameters(exponentiate=T) %>%
+#       as_tibble() %>%
+#       select(Parameter, Coefficient, CI_low, CI_high, p) %>%
+#   mutate(Mod = "D")
+
+bind_rows(mod_A, mod_B, mod_C, mod_D) %>%
+  filter(!str_detect(Parameter, "Intercept")) %>%
+  mutate(Parameter = case_when(str_detect(Parameter, "^dist_nsg") ~ "NSG",
+                               str_detect(Parameter, "^dist_trm") ~ "Trauma",
+                               TRUE                               ~ Parameter)) %>%
+  mutate(IRR = str_glue("{signif(Coefficient, 3)} ({signif(CI_low, 3)} - {signif(CI_high, 3)})"),
+         p_category = case_when(p<.001 ~ "***",
+                                p<.01  ~ "**",
+                                p<.05  ~ "*",
+                                # TRUE   ~ as.character(round(p, 2)))) %>%
+                                TRUE   ~ "")) %>%
+  
+  select(Mod, Parameter, IRR, p_category) %>%
+  mutate(IRR = paste0(IRR, p_category)) %>% select(-p_category) %>%
+  
+  pivot_wider(values_from = "IRR", names_from = "Mod") %>%
+  gt(rowname_col = "Parameter") %>%
+  tab_header(
+    title = "Table 3"
+  ) 
+rm(mod_A, mod_B, mod_C, mod_D)
+```
+
+# Addressing the 20% of missing counties
+
+```{r}
+rate_needed <- df_full %>%
+  # anti_join(df) %>%
+  filter(is.na(Deaths)) %>%
+  mutate(RateNeeded = 100000*20/StdPop) 
+
+rate_needed <- predict(base_mod, rate_needed, interval="prediction") %>%
+  as_tibble() %>%
+  bind_cols(rate_needed) %>%
+  rename(pred_rate=value)
+  # rename(pred_rate=fit, pred_rate.lwr=lwr, pred_rate.upr=upr)
+
+rate_needed %>%
+  mutate(pred_deaths = pred_rate*StdPop/100000) %>%
+  .$pred_deaths %>% print_mean_sd()
+  # View()
+  mutate(OverPredict = pred_deaths > 20) %>%
+  count(OverPredict) %>%
+  mutate(`%` = n/sum(n))
+```
+
+# Other discussion stuff
+
+```{r}
+df_full %>% group_by(dist_nsg_min>0) %>% summarise(pop=sum(pop12)) %>% mutate(`%`=pop/sum(pop))
+df_full %>% group_by(dist_nsg_min>0) %>% summarise(counties=n()) %>% mutate(`%`=counties/sum(counties))
+```
+
+
+# Other stuff
+
+```{r}
+library(tidycensus)
+
+vars_acs <- tidycensus::load_variables(2013, "acs5") 
+
+prop_poverty <- get_acs("county", variables = c("B17015_002"),
+                   summary_var = "B17015_001",
+                   year = 2013) %>%
+  # Replace missing moe's with 0
+  replace_na(list(moe=0, summary_moe=0)) %>%
+  
+  # # ## Join to names of variables
+  # # left_join(vars_acs12, by=c("variable"="name")) %>% select(-concept) %>%
+  # 
+  # ## Make variables readable
+  # mutate(variable = str_remove(variable, "B01001_")) %>%
+  # mutate(variable = case_when(variable=="002" ~ "Males",
+  #                             variable=="026" ~ "Females")) %>%
+  # ## Find proportion males 
+  # filter(variable=="Males") %>%
+  mutate(poverty     = estimate/summary_est,
+         poverty_moe = moe_prop(estimate, summary_est, moe, summary_moe)) %>%
+  select(GEOID, poverty, poverty_moe) %>%
+  
+  # Filter AK, HI, and PR  &   recode two counties
+  filter(!str_detect(GEOID, "^02"), 
+         !str_detect(GEOID, "^15"), 
+         !str_detect(GEOID, "^72")) %>%
+  mutate(GEOID = recode(GEOID, "46113"="46102"))
+# ignore "51515"="51019"
+
+
+prop_poverty %>% select(GEOID, poverty, poverty_moe) %>% anti_join(df_full)
+semi_join(df_full, prop_poverty) %>% anti_join(df_full)
+df_full %>% inner_join(prop_poverty)
+
+df %>% inner_join(prop_poverty) %>% 
+  make_table_2(family = "nb", divide_distance = 25, 
+               baseVars = c("male", "Over65", "Urbanization", "poverty"))
+```
+
+```{r}
+library(tidycensus)
+prop_ins <- get_acs("county", variables = c("B27001_002"),
+                   summary_var = "B27001_001",
+                   year = 2013) %>%
+  # Replace missing moe's with 0
+  replace_na(list(moe=0, summary_moe=0)) %>%
+  
+  # # ## Join to names of variables
+  # # left_join(vars_acs12, by=c("variable"="name")) %>% select(-concept) %>%
+  # 
+  # ## Make variables readable
+  # mutate(variable = str_remove(variable, "B01001_")) %>%
+  # mutate(variable = case_when(variable=="002" ~ "Males",
+  #                             variable=="026" ~ "Females")) %>%
+  # ## Find proportion males 
+  # filter(variable=="Males") %>%
+  mutate(poverty     = estimate/summary_est,
+         poverty_moe = moe_prop(estimate, summary_est, moe, summary_moe)) %>%
+  select(GEOID, poverty, poverty_moe) %>%
+  
+  # Filter AK, HI, and PR  &   recode two counties
+  filter(!str_detect(GEOID, "^02"), 
+         !str_detect(GEOID, "^15"), 
+         !str_detect(GEOID, "^72")) %>%
+  mutate(GEOID = recode(GEOID, "46113"="46102"))
+# ignore "51515"="51019"
+```
+
+
+```{r}
+df_full %>%
+  group_by(Urbanization) %>%
+  filter(!is.na(Deaths)) %>%
+  summarise(NSG = mean(dist_nsg_cent),
+            Trauma = mean(dist_trm_cent))
+```
+
+
+# Pretty maps
+
+## Figure 2
+
+```{r}
+Fig_dist <- US_counties %>%
+  select(-NAME) %>%
+  # filter(STATEFP=="48") %>%
+  geo_join(df_full, by="GEOID") %>%
+  ggplot() +
+  
+  geom_sf(data = US_states, fill=NA, color="black") +
+  geom_sf(aes(fill=dist_nsg_cent), color=NA) + 
+  
+  coord_sf(crs = 4269) +
+  scale_fill_distiller(palette="Blues", guide = 'legend',
+                       na.value = "grey50",
+                       trans="sqrt",
+                       # values=scales::rescale(quantile(df$dist_cent)),
+                       name="Distance (miles)", direction=1) +
+  # theme_dark()
+  ggthemes::theme_map() +
+  # labs(title = "[Fig 2] Distance to nearest neurosurgeon") +
+  theme(legend.direction="horizontal") 
+
+Fig_dist # export: 700 x 450
+
+Fig_dist + scale_fill_distiller(palette="Greys", guide = 'legend',
+                       na.value = "grey50",
+                       trans="sqrt",
+                       # values=scales::rescale(quantile(df$dist_cent)),
+                       name="Distance (miles)", direction=1) 
+```
+
+
+## OTHER
+
+```{r}
+POS <- read_csv("POS_2017/geocoded/POS_2017_tracts.csv", 
+                col_types = cols(Census.Tracts.GEOID = col_character(), 
+                                 accuracy = col_double(), type = col_character())) %>%
+  filter(HospType!="Long term") %>%
+  filter(!state %in% c("HI", "AK", "GU", "PR")) %>%
+  st_as_sf(coords = c("long", "lat"), crs=4269)
+
+provs <- read_csv("Google_results/geo_google_raw.csv") %>%
+  filter(geoState!="hi", geoState!="ak") %>%
+  st_as_sf(coords = c("lon", "lat"), crs=4269)
+
+
+
+# settings for tigris
+options(tigris_class = "sf")
+options(tigris_use_cache = T) 
+
+# ## Counties  c(state.abb, "DC")
+# c("TX", "MO") %>%
+#   map(~tigris::tracts(state = .x, cb=T) ) %>%
+#   rbind_tigris()
+# 
+# 
+# TX_tracts <- tigris::tracts(state = "TX", cb=T) 
+# MO_tracts <- tigris::tracts(state = "MO", cb=T) 
+# 
+# rbind(TX_tracts, MO_tracts) %>%
+#   filter(STATEFP!="02", STATEFP!="15") %>%
+#   select(GEOID) %>% plot()
+
+# filter(POS, Trauma) %>%
+#   count(Census.Tracts.GEOID) %>%
+#   st_drop_geometry() %>%
+#   geo_join(US_tracts, ., by_sp="GEOID", by_df="Census.Tracts.GEOID")
+
+
+# pts <- filter(POS, Trauma) 
+# 
+# 
+# hex_polygons <- pts %>%
+#   as_Spatial() %>% 
+#   sp::spsample(type = "hexagonal", n=30000) %>%
+#   sp::HexPoints2SpatialPolygons() %>%
+#   st_as_sf(crs = 4269) %>%
+#   st_intersection(US_states)
+# 
+# hex_polygons$count <- lengths(st_intersects(hex_polygons, pts))
+# 
+# hex_polygons %>%
+#   filter(count>0) %>%
+#   ggplot() +
+#   geom_sf(aes(fill = count)) +
+#   scale_fill_viridis_c(option = "magma", "# Trauma Facilities") +
+#   theme_void()
+
+US_counties %>% 
+  select(GEOID) %>%
+  geo_join(df_full, by="GEOID") %>%
+  ggplot() +
+  geom_sf(data = US_states, fill=NA, color="black") +
+  geom_sf(aes(fill=Urbanization), color=NA) +
+  coord_sf(crs = 4269) +
+  ggthemes::theme_map() +
+  scale_fill_brewer(direction = -1, palette = "greens") +
+  geom_sf(data=filter(POS, Trauma), alpha=.25)
+
+filter(POS, Trauma)  %>%
+  # count(state)
+  ggplot() +
+  
+  geom_sf(data = US_counties) +
+  # stat_bin2d(data=x, aes(long, lat), binwidth = .5) +
+  geom_sf()
+
+ggplot() + stat_bin2d(data=x, aes(long, lat), binwidth = .5)
+```
 
