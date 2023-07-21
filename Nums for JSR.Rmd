@@ -649,7 +649,7 @@ df_full %>%
 ```{r}
 Fig_dist <- US_counties %>%
   select(-NAME) %>%
-  # filter(STATEFP=="48") %>%
+  filter(STATEFP=="48") %>%
   geo_join(df_full, by="GEOID") %>%
   ggplot() +
   
